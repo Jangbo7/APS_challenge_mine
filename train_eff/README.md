@@ -1,12 +1,12 @@
-# EfficientNetV2 训练测试框架
+# EfficientNetV2/Convnext 训练测试框架
 
 这是一个基于 PyTorch 和 EfficientNetV2 的图像分类训练测试框架，用于 APSNet 项目的植物种子分类任务。
-目前预计尝试使用effcientnetv2作为基础分类模型。
+目前预计尝试使用effcientnetv2/convnext作为基础分类模型。
 
 ## 目录结构
 
 ```
-try/
+train_eff/
 ├── config.py           # 配置文件
 ├── dataset.py          # 数据集加载（包含BalancedBatchSampler）
 ├── model.py            # EfficientNetV2 模型定义
@@ -230,10 +230,11 @@ python predict_ensemble.py
 
 ## 模型说明
 
-默认使用 **EfficientNetV2-S** 模型，支持以下变体：
-- `s`: EfficientNetV2-S (默认)
-- `m`: EfficientNetV2-M
-- `l`: EfficientNetV2-L
+默认使用 **convnext_base/efficientnet_v2_s** 模型，支持以下变体：
+- `s`: EfficientNetV2-S (默认)/convnext_tiny
+- `m`: EfficientNetV2-M   /convnext_small
+- `l`: EfficientNetV2-L   /convnext_base
+- `xl`: ~~ /convnext_large
 
 可在 `model.py` 中修改 `model_type` 参数切换模型。
 
