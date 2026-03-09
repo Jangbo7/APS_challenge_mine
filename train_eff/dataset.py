@@ -2,6 +2,7 @@ import os
 import random
 import math
 import torch
+import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, Subset, Sampler, BatchSampler
 from torchvision import transforms
 from PIL import Image
@@ -16,11 +17,11 @@ class BalancedBatchSampler(BatchSampler):
     1. 按类别分组索引
     2. 计算每个batch中每个类别应包含的样本数 n
     3. 正常情况下，每个batch包含所有类别，每个类别 n 个样本
-    4. 只有当最后一个batch样本不足时，才随机选择部分类别来填充
+    4. 样本较少的类别允许过采样（循环使用）
     
     注意：返回的索引是相对于子集的索引（0到len(indices)-1），而不是原始数据集的索引
     """
-    def __init__(self, dataset, indices, batch_size, num_classes, seed=42):
+    def __init__(self, dataset, indices, batch_size, num_classes, seed=42, use_oversampling=True):
         """
         Args:
             dataset: 数据集对象
@@ -28,11 +29,15 @@ class BalancedBatchSampler(BatchSampler):
             batch_size: 期望的batch大小（会被调整为类别数的倍数）
             num_classes: 类别数量
             seed: 随机种子
+            use_oversampling: 是否允许过采样（默认True）
+                              为True时，按照最大类别样本数决定batch数量，其他类别过采样
+                              为False时，按照最小类别样本数决定batch数量
         """
         self.dataset = dataset
         self.indices = indices
         self.num_classes = num_classes
         self.seed = seed
+        self.use_oversampling = use_oversampling
         
         # 计算每个batch中每个类别应包含的样本数 n
         # batch_size = n * num_classes
@@ -49,17 +54,34 @@ class BalancedBatchSampler(BatchSampler):
         # 计算每个类别的样本数
         self.class_sizes = {label: len(indices) for label, indices in self.class_to_subset_indices.items()}
         
-        # 计算每个类别的最小样本数
+        # 计算最小和最大类别的样本数
         self.min_class_size = min(self.class_sizes.values())
+        self.max_class_size = max(self.class_sizes.values())
+        
+        # 根据是否使用过采样决定使用哪个类别大小来计算batch数量
+        if use_oversampling:
+            # 使用过采样：按照最大类别样本数决定batch数量，其他类别循环使用
+            reference_size = self.max_class_size
+        else:
+            # 不使用过采样：按照最小类别样本数决定batch数量
+            reference_size = self.min_class_size
         
         # 计算每个epoch的batch数量
-        # 每个epoch中，每个类别最多使用 min_class_size 个样本
-        # 每个batch从每个类别取 n_per_class 个样本
-        self.batches_per_epoch = self.min_class_size // self.n_per_class
+        self.batches_per_epoch = reference_size // self.n_per_class
         
-        # 如果样本数不足，调整 n_per_class
+        # 如果batch数量太少（少于10个），调整 n_per_class 以获得更多batch
+        min_batches_per_epoch = 10
+        if self.batches_per_epoch < min_batches_per_epoch:
+            self.n_per_class = max(1, reference_size // min_batches_per_epoch)
+            self.actual_batch_size = self.n_per_class * num_classes
+            self.batches_per_epoch = reference_size // self.n_per_class
+            
+            if self.batches_per_epoch == 0:
+                self.batches_per_epoch = 1
+        
+        # 确保至少有1个batch
         if self.batches_per_epoch == 0:
-            self.n_per_class = self.min_class_size
+            self.n_per_class = reference_size
             self.actual_batch_size = self.n_per_class * num_classes
             self.batches_per_epoch = 1
         
@@ -98,12 +120,14 @@ class BalancedBatchSampler(BatchSampler):
                 needed_classes = remaining_samples // self.n_per_class
                 if remaining_samples % self.n_per_class != 0:
                     needed_classes += 1
-                needed_classes = min(needed_classes, self.num_classes)
+                needed_classes = max(1, min(needed_classes, self.num_classes))
                 
                 # 随机选择 needed_classes 个类别
                 available_classes = [label for label in range(self.num_classes)
                                     if len(class_indices_shuffled[label]) > 0]
-                selected_classes = random.sample(available_classes, min(needed_classes, len(available_classes)))
+                # 确保 needed_classes 不超过 available_classes 的数量
+                needed_classes = min(needed_classes, len(available_classes))
+                selected_classes = random.sample(available_classes, needed_classes)
             else:
                 # 正常情况：使用所有类别
                 selected_classes = list(range(self.num_classes))
@@ -229,22 +253,122 @@ class APSSubsetDataset(Dataset):
         return image, label, img_path
 
 
-def get_transforms(is_train=True, image_size=224):
+class AddFreqChannels(nn.Module):
+    """
+    输入:  x [3,H,W] (ToTensor后, 0~1)
+    输出:  [5,H,W] = RGB(标准ImageNet归一化) + High(1ch) + Low(1ch)
+    说明:
+    - 高频/低频用 FFT 的频域掩码分离
+    - 额外通道做"每样本标准化"(均值0方差1)，避免尺度不稳
+    """
+    def __init__(self, low_pass_size: int = 12, use_abs: bool = True, eps: float = 1e-6):
+        super().__init__()
+        self.low_pass_size = int(low_pass_size)
+        self.use_abs = bool(use_abs)
+        self.eps = float(eps)
+
+        # ImageNet RGB normalize
+        self.rgb_mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+        self.rgb_std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+
+    def _standardize(self, t: torch.Tensor) -> torch.Tensor:
+        # t: [1,H,W]
+        m = t.mean()
+        s = t.std(unbiased=False)
+        return (t - m) / (s + self.eps)
+
+    def _fft_split(self, x: torch.Tensor) -> tuple:
+        # x: [3,H,W]
+        _, H, W = x.shape
+
+        # FFT -> shift to center
+        X = torch.fft.fft2(x, dim=(-2, -1))
+        X = torch.fft.fftshift(X, dim=(-2, -1))
+
+        mask = torch.zeros((H, W), dtype=torch.float32, device=x.device)
+        crow, ccol = H // 2, W // 2
+        s = self.low_pass_size
+        mask[max(0, crow - s):min(H, crow + s), max(0, ccol - s):min(W, ccol + s)] = 1.0
+        mask = mask.view(1, H, W)
+
+        low_fft = X * mask
+        high_fft = X * (1.0 - mask)
+
+        # inverse shift -> iFFT
+        low = torch.fft.ifftshift(low_fft, dim=(-2, -1))
+        low = torch.fft.ifft2(low, dim=(-2, -1)).real
+
+        high = torch.fft.ifftshift(high_fft, dim=(-2, -1))
+        high = torch.fft.ifft2(high, dim=(-2, -1)).real
+
+        low1 = low.mean(dim=0, keepdim=True)
+        high1 = high.mean(dim=0, keepdim=True)
+
+        if self.use_abs:
+            low1 = low1.abs()
+            high1 = high1.abs()
+
+        return high1, low1
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [3,H,W], float
+        if x.ndim != 3 or x.shape[0] != 3:
+            raise ValueError(f"AddFreqChannels expects [3,H,W], got {tuple(x.shape)}")
+
+        # RGB normalize
+        rgb = (x - self.rgb_mean.to(x.device)) / self.rgb_std.to(x.device)
+
+        # freq channels
+        high1, low1 = self._fft_split(x)
+        high1 = self._standardize(high1)
+        low1 = self._standardize(low1)
+
+        return torch.cat([rgb, high1, low1], dim=0)  # [5,H,W]
+
+
+def get_transforms(is_train=True, image_size=224, use_freq_channels=False, low_pass_size=12):
+    """
+    获取图像变换
+    
+    Args:
+        is_train: 是否为训练模式
+        image_size: 图像尺寸
+        use_freq_channels: 是否使用频率通道处理(添加高频和低频)
+                          如果为True，输出5通道 [RGB + High + Low]
+                          如果为False，输出3通道 [RGB]
+        low_pass_size: 低频掩码大小（仅当use_freq_channels=True时有效）
+    """
     if is_train:
-        return transforms.Compose([
+        transforms_list = [
             transforms.Resize((image_size, image_size)),
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.RandomRotation(degrees=15),
             transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
+        ]
+        
+        if use_freq_channels:
+            # 使用频率处理，跳过标准归一化
+            transforms_list.append(AddFreqChannels(low_pass_size=low_pass_size))
+        else:
+            # 使用标准归一化
+            transforms_list.append(transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]))
+        
+        return transforms.Compose(transforms_list)
     else:
-        return transforms.Compose([
+        transforms_list = [
             transforms.Resize((image_size, image_size)),
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
+        ]
+        
+        if use_freq_channels:
+            # 使用频率处理，跳过标准归一化
+            transforms_list.append(AddFreqChannels(low_pass_size=low_pass_size))
+        else:
+            # 使用标准归一化
+            transforms_list.append(transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]))
+        
+        return transforms.Compose(transforms_list)
 
 
 def split_dataset_stratified(dataset, val_ratio=0.2, seed=42):
@@ -281,7 +405,7 @@ def split_dataset_stratified(dataset, val_ratio=0.2, seed=42):
     return train_indices, val_indices
 
 
-def undersample_train_set(full_train_dataset, train_indices, max_samples_per_class=100, seed=42):
+def undersample_train_set(full_train_dataset, train_indices, max_samples_per_class=200, seed=42):
     """
     对训练集进行下采样，每个类别最多使用指定数量的样本
     
@@ -373,7 +497,7 @@ def get_dataloaders(config):
         train_indices, class_stats = undersample_train_set(
             full_train_dataset,
             train_indices,
-            max_samples_per_class=100,
+            max_samples_per_class=config.undersample_num,
             seed=config.SEED
         )
         
@@ -385,8 +509,18 @@ def get_dataloaders(config):
         print("="*60 + "\n")
     
     # 创建带不同transform的子数据集
-    train_transform = get_transforms(is_train=True, image_size=config.IMAGE_SIZE)
-    val_transform = get_transforms(is_train=False, image_size=config.IMAGE_SIZE)
+    train_transform = get_transforms(
+        is_train=True,
+        image_size=config.IMAGE_SIZE,
+        use_freq_channels=getattr(config, "USE_FREQ_CHANNELS", False),
+        low_pass_size=getattr(config, "LOW_PASS_SIZE", 12),
+    )
+    val_transform = get_transforms(
+        is_train=False,
+        image_size=config.IMAGE_SIZE,
+        use_freq_channels=getattr(config, "USE_FREQ_CHANNELS", False),
+        low_pass_size=getattr(config, "LOW_PASS_SIZE", 12),
+    )
     
     train_dataset = APSSubsetDataset(full_train_dataset, train_indices, train_transform)
     val_dataset = APSSubsetDataset(full_train_dataset, val_indices, val_transform)
@@ -456,7 +590,12 @@ def get_test_dataloader(config):
     
     class_to_idx = {cls: idx for idx, cls in enumerate(class_names)}
     
-    test_transform = get_transforms(is_train=False, image_size=config.IMAGE_SIZE)
+    test_transform = get_transforms(
+        is_train=False,
+        image_size=config.IMAGE_SIZE,
+        use_freq_channels=getattr(config, "USE_FREQ_CHANNELS", False),
+        low_pass_size=getattr(config, "LOW_PASS_SIZE", 12),
+    )
     test_dataset = APSDataset(
         root_dir=config.TEST_DIR,
         class_to_idx=class_to_idx,

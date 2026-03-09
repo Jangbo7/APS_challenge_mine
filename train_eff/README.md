@@ -7,14 +7,16 @@
 
 ```
 try/
-├── config.py      # 配置文件
-├── dataset.py     # 数据集加载（包含BalancedBatchSampler）
-├── model.py       # EfficientNetV2 模型定义
-├── train.py       # 训练脚本
-├── test.py        # 测试脚本
-├── utils.py       # 工具函数
-├── metrics.py     # 类别级指标计算
-└── checkpoints/   # 模型保存目录
+├── config.py           # 配置文件
+├── dataset.py          # 数据集加载（包含BalancedBatchSampler）
+├── model.py            # EfficientNetV2 模型定义
+├── train.py            # 训练脚本
+├── train_ensemble.py   # 集成学习训练脚本
+├── predict_ensemble.py # 集成预测脚本
+├── test.py             # 测试脚本
+├── utils.py            # 工具函数
+├── metrics.py          # 类别级指标计算
+└── checkpoints/        # 模型保存目录
 ```
 
 ## 数据格式
@@ -70,6 +72,7 @@ python test.py
 - `IMAGE_SIZE`: 输入图像尺寸（默认224）
 - `DEVICE`: 训练设备（默认cuda）
 - `VAL_SPLIT`: 验证集分割比例（默认0.2）
+
 
 ## 高级功能
 
@@ -154,6 +157,76 @@ Overall              160        0.9100       0.8938       0.9018
 - F1-Score（F1分数）
 - Support（样本数）
 - Confusion Matrix（混淆矩阵）
+
+### 5. 增加两个频率通道
+在config中通过use_freq_channel调控是否使用，low_pass_size调控低频掩码大小。
+
+
+
+
+## 集成学习
+
+### 配置参数
+
+在 `config.py` 中配置集成学习相关参数：
+
+```python
+# 要训练的模型数量
+NUM_ENSEMBLE_MODELS = 5
+
+# 是否在训练完成后自动运行集成预测
+AUTO_PREDICT_ENSEMBLE = False
+
+# 集成预测策略: 'average' (平均), 'voting' (投票), 'weighted' (加权)
+ENSEMBLE_STRATEGY = 'average'
+```
+
+### 训练多个模型
+
+使用 `train_ensemble.py` 可以训练多个独立的模型用于集成：
+
+```bash
+python train_ensemble.py
+```
+
+**功能说明：**
+- 自动训练多个模型（数量由 `NUM_ENSEMBLE_MODELS` 配置）
+- 每个模型使用不同的随机种子
+- 所有模型保存在独立的子目录中
+- 训练完成后自动生成训练报告
+- 如果 `AUTO_PREDICT_ENSEMBLE=True`，训练完成后自动运行集成预测
+
+### 集成预测
+
+使用 `predict_ensemble.py` 对测试集进行集成预测：
+
+```bash
+python predict_ensemble.py
+```
+
+**支持的集成策略：**
+
+1. **average - 平均预测概率（推荐）**
+   - 对所有模型的预测概率取平均
+   - 通常效果最好
+
+2. **voting - 投票**
+   - 每个模型投票选择类别
+   - 选择票数最多的类别
+
+3. **weighted - 加权平均**
+   - 根据模型验证集准确率加权
+   - 准确率高的模型权重更大
+
+**输出：**
+- 生成 `ensemble_predictions.csv` 文件
+- 包含文件名和预测类别
+
+### 集成学习的优势
+
+- **提升性能**：多个模型的集成通常比单个模型表现更好
+- **降低过拟合风险**：不同模型的错误可以相互抵消
+- **提高鲁棒性**：对数据扰动更加稳定
 
 ## 模型说明
 
