@@ -3,6 +3,12 @@ import torch.nn as nn
 import torch.hub
 import os
 from torchvision import models
+try:
+    import timm
+    TIMM_AVAILABLE = True
+except ImportError:
+    TIMM_AVAILABLE = False
+    print("Warning: timm library not found. ConvNeXtV2 models will not be available.")
 
 
 def _adapt_stem_conv_in_channels(backbone: nn.Module, in_channels: int = 3, model_type='efficientnetv2'):
@@ -15,7 +21,7 @@ def _adapt_stem_conv_in_channels(backbone: nn.Module, in_channels: int = 3, mode
     Args:
         backbone: 模型backbone
         in_channels: 目标输入通道数
-        model_type: 模型类型('efficientnetv2' 或 'convnext')
+        model_type: 模型类型('efficientnetv2', 'convnext', 或 'convnextv2')
     
     Returns:
         修改后的backbone
@@ -28,7 +34,7 @@ def _adapt_stem_conv_in_channels(backbone: nn.Module, in_channels: int = 3, mode
     if model_type.startswith('efficientnetv2'):
         old_conv = backbone.features[0][0]  # EfficientNetV2 结构
     elif model_type.startswith('convnext'):
-        old_conv = backbone.features[0]  # ConvNeXt 结构
+        old_conv = backbone.features[0]  # ConvNeXt/ConvNeXtV2 结构
     
     if old_conv is None or not isinstance(old_conv, nn.Conv2d):
         return backbone
@@ -210,6 +216,90 @@ def get_convnext_large(num_classes=17, pretrained=True):
     return model
 
 
+def get_convnextv2_tiny(num_classes=17, pretrained=True):
+    """
+    获取 ConvNeXtV2 Tiny 模型
+    
+    Args:
+        num_classes: 类别数量
+        pretrained: 是否使用预训练权重
+    
+    Returns:
+        model: ConvNeXtV2 Tiny 模型
+    """
+    if not TIMM_AVAILABLE:
+        raise ImportError("timm library is required for ConvNeXtV2 models. Install with: pip install timm")
+    
+    model = timm.create_model('convnextv2_tiny.fcmae_ft_in22k_in1k', pretrained=pretrained, num_classes=0)
+    num_features = model.head.in_features
+    model.head = nn.Linear(num_features, num_classes)
+    
+    return model
+
+
+def get_convnextv2_base(num_classes=17, pretrained=True):
+    """
+    获取 ConvNeXtV2 Base 模型
+    
+    Args:
+        num_classes: 类别数量
+        pretrained: 是否使用预训练权重
+    
+    Returns:
+        model: ConvNeXtV2 Base 模型
+    """
+    if not TIMM_AVAILABLE:
+        raise ImportError("timm library is required for ConvNeXtV2 models. Install with: pip install timm")
+    
+    model = timm.create_model('convnextv2_base.fcmae_ft_in22k_in1k', pretrained=pretrained, num_classes=0)
+    num_features = model.head.in_features
+    model.head = nn.Linear(num_features, num_classes)
+    
+    return model
+
+
+def get_convnextv2_large(num_classes=17, pretrained=True):
+    """
+    获取 ConvNeXtV2 Large 模型
+    
+    Args:
+        num_classes: 类别数量
+        pretrained: 是否使用预训练权重
+    
+    Returns:
+        model: ConvNeXtV2 Large 模型
+    """
+    if not TIMM_AVAILABLE:
+        raise ImportError("timm library is required for ConvNeXtV2 models. Install with: pip install timm")
+    
+    model = timm.create_model('convnextv2_large.fcmae_ft_in22k_in1k', pretrained=pretrained, num_classes=0)
+    num_features = model.head.in_features
+    model.head = nn.Linear(num_features, num_classes)
+    
+    return model
+
+
+def get_convnextv2_huge(num_classes=17, pretrained=True):
+    """
+    获取 ConvNeXtV2 Huge 模型
+    
+    Args:
+        num_classes: 类别数量
+        pretrained: 是否使用预训练权重
+    
+    Returns:
+        model: ConvNeXtV2 Huge 模型
+    """
+    if not TIMM_AVAILABLE:
+        raise ImportError("timm library is required for ConvNeXtV2 models. Install with: pip install timm")
+    
+    model = timm.create_model('convnextv2_huge.fcmae_ft_in22k_in1k', pretrained=pretrained, num_classes=0)
+    num_features = model.head.in_features
+    model.head = nn.Linear(num_features, num_classes)
+    
+    return model
+
+
 class ModelClassifier(nn.Module):
     """
     通用模型分类器包装类，支持 EfficientNetV2 和 ConvNeXt
@@ -253,28 +343,60 @@ class ModelClassifier(nn.Module):
                 self.backbone = _adapt_stem_conv_in_channels(self.backbone, in_channels=in_channels, model_type='efficientnetv2')
                 
         elif model_type.startswith('convnext'):
-            sub_type = model_type.split('_')[-1]  # 'tiny', 'small', 'base', 'large'
-            if sub_type == 'tiny':
-                weights = models.ConvNeXt_Tiny_Weights.IMAGENET1K_V1 if pretrained else None
-                self.backbone = models.convnext_tiny(weights=weights)
-            elif sub_type == 'small':
-                weights = models.ConvNeXt_Small_Weights.IMAGENET1K_V1 if pretrained else None
-                self.backbone = models.convnext_small(weights=weights)
-            elif sub_type == 'base':
-                weights = models.ConvNeXt_Base_Weights.IMAGENET1K_V1 if pretrained else None
-                self.backbone = models.convnext_base(weights=weights)
-            elif sub_type == 'large':
-                weights = models.ConvNeXt_Large_Weights.IMAGENET1K_V1 if pretrained else None
-                self.backbone = models.convnext_large(weights=weights)
+            if 'v2' in model_type:
+                # ConvNeXtV2 模型
+                if not TIMM_AVAILABLE:
+                    raise ImportError("timm library is required for ConvNeXtV2 models. Install with: pip install timm")
+                
+                sub_type = model_type.split('_')[-1]  # 'tiny', 'base', 'large', 'huge'
+                if sub_type == 'tiny':
+                    self.backbone = timm.create_model('convnextv2_tiny.fcmae_ft_in22k_in1k', pretrained=pretrained, num_classes=num_classes)
+                elif sub_type == 'base':
+                    self.backbone = timm.create_model('convnextv2_base.fcmae_ft_in22k_in1k', pretrained=pretrained, num_classes=num_classes)
+                elif sub_type == 'large':
+                    self.backbone = timm.create_model('convnextv2_large.fcmae_ft_in22k_in1k', pretrained=pretrained, num_classes=num_classes)
+                elif sub_type == 'huge':
+                    self.backbone = timm.create_model('convnextv2_huge.fcmae_ft_in22k_in1k', pretrained=pretrained, num_classes=num_classes)
+                else:
+                    raise ValueError(f"Unknown ConvNeXtV2 type: {sub_type}")
+                
+                # 适配输入通道数
+                if in_channels != 3:
+                    self.backbone = _adapt_stem_conv_in_channels(self.backbone, in_channels=in_channels, model_type='convnextv2')
+                
+                # 如果需要添加 dropout，直接修改分类头
+                if hasattr(self.backbone, 'head'):
+                    if isinstance(self.backbone.head, nn.Linear):
+                        # 替换为带 dropout 的分类头
+                        in_features = self.backbone.head.in_features
+                        self.backbone.head = nn.Sequential(
+                            nn.Dropout(p=dropout, inplace=True),
+                            nn.Linear(in_features, num_classes)
+                        )
             else:
-                raise ValueError(f"Unknown ConvNeXt type: {sub_type}")
-            
-            # 适配输入通道数
-            if in_channels != 3:
-                self.backbone = _adapt_stem_conv_in_channels(self.backbone, in_channels=in_channels, model_type='convnext')
-            
-            classifier_in_features = self.backbone.classifier[2].in_features
-            self.backbone.classifier[2] = nn.Linear(classifier_in_features, num_classes)
+                # ConvNeXt V1 模型
+                sub_type = model_type.split('_')[-1]  # 'tiny', 'small', 'base', 'large'
+                if sub_type == 'tiny':
+                    weights = models.ConvNeXt_Tiny_Weights.IMAGENET1K_V1 if pretrained else None
+                    self.backbone = models.convnext_tiny(weights=weights)
+                elif sub_type == 'small':
+                    weights = models.ConvNeXt_Small_Weights.IMAGENET1K_V1 if pretrained else None
+                    self.backbone = models.convnext_small(weights=weights)
+                elif sub_type == 'base':
+                    weights = models.ConvNeXt_Base_Weights.IMAGENET1K_V1 if pretrained else None
+                    self.backbone = models.convnext_base(weights=weights)
+                elif sub_type == 'large':
+                    weights = models.ConvNeXt_Large_Weights.IMAGENET1K_V1 if pretrained else None
+                    self.backbone = models.convnext_large(weights=weights)
+                else:
+                    raise ValueError(f"Unknown ConvNeXt type: {sub_type}")
+                
+                # 适配输入通道数
+                if in_channels != 3:
+                    self.backbone = _adapt_stem_conv_in_channels(self.backbone, in_channels=in_channels, model_type='convnext')
+                
+                classifier_in_features = self.backbone.classifier[2].in_features
+                self.backbone.classifier[2] = nn.Linear(classifier_in_features, num_classes)
             
         else:
             raise ValueError(f"Unknown model type: {model_type}")
@@ -290,7 +412,7 @@ class ModelClassifier(nn.Module):
             x = self.backbone.avgpool(x)
             x = torch.flatten(x, 1)
         elif hasattr(self.backbone, 'avgpool'):
-            # ConvNeXt
+            # ConvNeXt / ConvNeXtV2
             x = self.backbone.avgpool(self.backbone.features(x))
             x = torch.flatten(x, 1)
         return x

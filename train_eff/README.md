@@ -230,13 +230,57 @@ python predict_ensemble.py
 
 ## 模型说明
 
-默认使用 **convnext_base/efficientnet_v2_s** 模型，支持以下变体：
-- `s`: EfficientNetV2-S (默认)/convnext_tiny
-- `m`: EfficientNetV2-M   /convnext_small
-- `l`: EfficientNetV2-L   /convnext_base
-- `xl`: ~~ /convnext_large
+### 支持的模型
 
-可在 `model.py` 中修改 `model_type` 参数切换模型。
+默认使用 **convnext_base/efficientnet_v2_s** 模型，支持以下变体：
+
+#### EfficientNetV2
+- `efficientnetv2_s`: EfficientNetV2-S (轻量级，默认)
+- `efficientnetv2_m`: EfficientNetV2-M (中等规模)
+- `efficientnetv2_l`: EfficientNetV2-L (大型)
+
+#### ConvNeXt V1
+- `convnext_tiny`: ConvNeXt Tiny
+- `convnext_small`: ConvNeXt Small
+- `convnext_base`: ConvNeXt Base (默认)
+- `convnext_large`: ConvNeXt Large
+
+#### ConvNeXtV2 (需要安装 timm 库)
+- `convnextv2_tiny`: ConvNeXtV2 Tiny
+- `convnextv2_base`: ConvNeXtV2 Base
+- `convnextv2_large`: ConvNeXtV2 Large
+- `convnextv2_huge`: ConvNeXtV2 Huge
+
+可在 `config.py` 中修改 `MODEL_TYPE` 参数切换模型：
+
+```python
+# config.py
+MODEL_TYPE = 'convnextv2_base'  # 使用 ConvNeXtV2 Base 模型
+```
+
+### 使用 ConvNeXtV2 模型
+
+#### 1. 安装依赖
+```bash
+pip install timm
+```
+
+#### 2. 解决网络问题（方法1）
+如果遇到网络连接问题无法下载 Hugging Face 模型，可以设置 Hugging Face 镜像：
+
+```bash
+# 设置镜像源
+export HF_ENDPOINT="https://hf-mirror.com"
+
+# 然后运行训练
+python train.py
+```
+
+#### 3. 其他解决方案
+- **方法2**：在代码中设置镜像（修改 `model.py`）
+- **方法3**：手动下载模型权重到本地
+
+详细见「常见问题」部分。
 
 ## 依赖
 
@@ -245,6 +289,16 @@ python predict_ensemble.py
 - tqdm
 - pandas
 - Pillow
+- timm (仅当使用 ConvNeXtV2 模型时需要)
+
+**安装命令：**
+```bash
+# 基本依赖
+pip install torch torchvision tqdm pandas Pillow
+
+# 如需使用 ConvNeXtV2 模型
+pip install timm
+```
 
 ## 类别信息
 
@@ -284,3 +338,61 @@ python predict_ensemble.py
 - `undersample_train_set()`: 训练集下采样函数
 - `calculate_optimal_batch_size()`: 计算最优batch size
 - `split_dataset_stratified()`: 分层分割数据集
+
+## 常见问题
+
+### 1. 网络连接问题（Hugging Face 下载失败）
+
+当使用 ConvNeXtV2 模型时，可能会遇到网络连接问题：
+
+```
+Max retries exceeded with url: /timm/convnextv2_base.fcmae_ft_in22k_in1k/resolve/main/model.safetensors
+```
+
+**解决方案：**
+
+#### 方法1：设置 Hugging Face 镜像（推荐）
+```bash
+# 设置镜像源
+export HF_ENDPOINT="https://hf-mirror.com"
+
+# 然后运行训练
+python train.py
+```
+
+#### 方法2：在代码中设置镜像
+修改 `model.py` 文件，在导入 timm 后添加：
+
+```python
+import os
+# 设置 Hugging Face 镜像
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+```
+
+#### 方法3：手动下载模型
+1. 从镜像站下载模型：https://hf-mirror.com/timm/convnextv2_base.fcmae_ft_in22k_in1k
+2. 下载 `model.safetensors` 文件
+3. 放到 timm 的模型缓存目录：
+   ```
+   ~/.cache/huggingface/hub/models--timm--convnextv2_base.fcmae_ft_in22k_in1k/snapshots/
+   ```
+
+### 2. 内存不足问题
+
+如果遇到内存不足错误：
+- 减小 `BATCH_SIZE`
+- 使用更小的模型（如 `convnextv2_tiny` 或 `efficientnetv2_s`）
+- 启用 `IF_UNDERAMPLE=True` 减少训练数据量
+
+### 3. 训练速度慢
+
+- 确保使用 GPU 训练（`DEVICE='cuda'`）
+- 尝试使用混合精度训练（需要修改代码）
+- 启用 `IF_UNDERAMPLE=True` 减少训练数据量
+
+### 4. 模型性能问题
+
+- 尝试不同的模型变体（从 `small` 到 `large`）
+- 调整学习率和权重衰减
+- 增加训练轮数
+- 使用集成学习（`train_ensemble.py`）

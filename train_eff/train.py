@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from tqdm import tqdm
-
+from loss import FocalLoss
 from config import Config
 from dataset import get_dataloaders
 from model import build_model
@@ -123,8 +123,28 @@ def main():
     model = build_model(config)
     model = model.to(device)
     
-    # 定义损失函数和优化器
-    criterion = nn.CrossEntropyLoss()
+    if config.LOSS_TYPE == 'focal':
+        # 可选：按类别样本数计算 alpha（类别越少，权重越大）
+        alpha = None
+        if getattr(config, 'USE_CLASS_ALPHA', False):
+            # train_loader.dataset 需要有 targets 属性
+            targets = torch.tensor(train_loader.dataset.labels)
+            class_counts = torch.bincount(targets, minlength=config.NUM_CLASSES).float()
+            alpha = 1.0 / (class_counts + 1e-6)
+            alpha = alpha / alpha.sum() * config.NUM_CLASSES  # 归一化
+
+        criterion = FocalLoss(
+            gamma=config.FOCAL_GAMMA,
+            alpha=alpha,
+            label_smoothing=config.LABEL_SMOOTHING,
+        )
+        print(f"Using Focal Loss (gamma={config.FOCAL_GAMMA}, label_smoothing={config.LABEL_SMOOTHING})")
+    else:
+        criterion = nn.CrossEntropyLoss(
+            label_smoothing=config.LABEL_SMOOTHING
+        )
+        print("Using CrossEntropy Loss")
+        
     optimizer = optim.AdamW(
         model.parameters(),
         lr=config.LEARNING_RATE,
