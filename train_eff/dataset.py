@@ -239,6 +239,8 @@ class APSSubsetDataset(Dataset):
         self.dataset = dataset
         self.indices = indices
         self.transform = transform
+        # 添加 labels 属性，存储所有样本的标签
+        self.labels = [self.dataset.samples[idx][1] for idx in self.indices]
     
     def __len__(self):
         return len(self.indices)

@@ -69,7 +69,12 @@ class Config:
     RESUME = False
 
     # 损失函数配置
-    LOSS_TYPE = 'focal'          # 'cross_entropy' | 'focal'
-    FOCAL_GAMMA = 2.0            # focal loss 聚焦参数
+    LOSS_TYPE = 'cross_entropy'          # 'cross_entropy' | 'focal'
+    FOCAL_GAMMA = 1.5            # focal loss 聚焦参数
     LABEL_SMOOTHING = 0.1        # 标签平滑
-    USE_CLASS_ALPHA = False      # 是否按类别频率自动计算 alpha 权重
+    USE_CLASS_ALPHA = True     # 是否按类别频率自动计算 alpha 权重
+
+    # 数据增强配置（batch级别）
+    AUG_TYPE = 'mixup'   # 'none' | 'mixup' | 'cutmix' | 'both'(随机选一种)
+    AUG_ALPHA = 1.0       # Beta分布参数：mixup推荐0.4，cutmix推荐1.0
+    AUG_PROB = 0.5        # 每个batch执行增强的概率

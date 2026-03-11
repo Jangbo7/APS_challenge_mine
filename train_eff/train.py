@@ -1,6 +1,7 @@
 import os
 import sys
 import torch
+import numpy as np
 import torch.nn as nn
 import torch.optim as optim
 from tqdm import tqdm
@@ -8,6 +9,7 @@ from loss import FocalLoss
 from config import Config
 from dataset import get_dataloaders
 from model import build_model
+from augmentation import mixup_data, cutmix_data, mixed_criterion
 from utils import (
     set_seed, save_checkpoint, load_checkpoint,
     AverageMeter, accuracy, log_training, get_current_time
@@ -18,23 +20,42 @@ from metrics import (
 )
 
 
-def train_one_epoch(model, train_loader, criterion, optimizer, device, epoch):
+def train_one_epoch(model, train_loader, criterion, optimizer, device, epoch,config):
     """训练一个 epoch"""
     model.train()
     losses = AverageMeter()
     top1 = AverageMeter()
+
+    aug_type = getattr(config, 'AUG_TYPE', 'none')
+    aug_alpha = getattr(config, 'AUG_ALPHA', 1.0)
+    aug_prob = getattr(config, 'AUG_PROB', 0.5)
     
     pbar = tqdm(train_loader, desc=f"Epoch {epoch} [Train]")
     for images, labels, _ in pbar:
         images = images.to(device)
         labels = labels.to(device)
-        
-        # 前向传播
-        outputs = model(images)
-        loss = criterion(outputs, labels)
+                # ---- batch 级数据增强 ----
+        use_aug = (aug_type != 'none') and (np.random.rand() < aug_prob)
+        if use_aug:
+            if aug_type == 'both':
+                # 随机选一种
+                chosen = np.random.choice(['mixup', 'cutmix'])
+            else:
+                chosen = aug_type
+
+            if chosen == 'mixup':
+                images, labels_a, labels_b, lam = mixup_data(images, labels, alpha=aug_alpha)
+            else:  # cutmix
+                images, labels_a, labels_b, lam = cutmix_data(images, labels, alpha=aug_alpha)
+            optimizer.zero_grad()
+            outputs = model(images)
+            loss = mixed_criterion(criterion, outputs, labels_a, labels_b, lam)
+        else:
+            optimizer.zero_grad()
+            outputs = model(images)
+            loss = criterion(outputs, labels)
         
         # 反向传播
-        optimizer.zero_grad()
         loss.backward()
         optimizer.step()
         
@@ -144,7 +165,7 @@ def main():
             label_smoothing=config.LABEL_SMOOTHING
         )
         print("Using CrossEntropy Loss")
-        
+
     optimizer = optim.AdamW(
         model.parameters(),
         lr=config.LEARNING_RATE,
@@ -180,7 +201,7 @@ def main():
         
         # 训练
         train_loss, train_acc = train_one_epoch(
-            model, train_loader, criterion, optimizer, device, epoch+1
+            model, train_loader, criterion, optimizer, device, epoch+1, config
         )
         
         # 验证
