@@ -2,13 +2,22 @@ import torch
 import torch.nn as nn
 import torch.hub
 import os
+from pathlib import Path
 from torchvision import models
+from config import Config
+
 try:
     import timm
     TIMM_AVAILABLE = True
 except ImportError:
     TIMM_AVAILABLE = False
     print("Warning: timm library not found. ConvNeXtV2 models will not be available.")
+
+try:
+    from safetensors.torch import load_file
+    SAFETENSORS_AVAILABLE = True
+except ImportError:
+    SAFETENSORS_AVAILABLE = False
 
 
 def _adapt_stem_conv_in_channels(backbone: nn.Module, in_channels: int = 3, model_type='efficientnetv2'):
@@ -349,16 +358,44 @@ class ModelClassifier(nn.Module):
                     raise ImportError("timm library is required for ConvNeXtV2 models. Install with: pip install timm")
                 
                 sub_type = model_type.split('_')[-1]  # 'tiny', 'base', 'large', 'huge'
-                if sub_type == 'tiny':
-                    self.backbone = timm.create_model('convnextv2_tiny.fcmae_ft_in22k_in1k', pretrained=pretrained, num_classes=num_classes)
-                elif sub_type == 'base':
-                    self.backbone = timm.create_model('convnextv2_base.fcmae_ft_in22k_in1k', pretrained=pretrained, num_classes=num_classes)
-                elif sub_type == 'large':
-                    self.backbone = timm.create_model('convnextv2_large.fcmae_ft_in22k_in1k', pretrained=pretrained, num_classes=num_classes)
-                elif sub_type == 'huge':
-                    self.backbone = timm.create_model('convnextv2_huge.fcmae_ft_in22k_in1k', pretrained=pretrained, num_classes=num_classes)
+                timm_model_name = f'convnextv2_{sub_type}.fcmae_ft_in22k_in1k'
+                
+                # 首先尝试从本地加载权重
+                local_weight_path = self._get_local_weight(timm_model_name, pretrained)
+                
+                if local_weight_path:
+                    print(f"✓ 从本地加载权重: {local_weight_path}")
+                    # 加载没有预训练的模型，然后手动加载权重
+                    self.backbone = timm.create_model(timm_model_name, pretrained=False, num_classes=num_classes)
+                    try:
+                        # 支持 .safetensors 格式
+                        if local_weight_path.endswith('.safetensors'):
+                            if SAFETENSORS_AVAILABLE:
+                                state_dict = load_file(local_weight_path)
+                            else:
+                                raise ImportError("safetensors library is required to load .safetensors files. Install with: pip install safetensors")
+                        else:
+                            state_dict = torch.load(local_weight_path, map_location='cpu', weights_only=False)
+                        
+                        # 跳过类别数不匹配的分类头权重
+                        filtered_state_dict = {}
+                        for k, v in state_dict.items():
+                            # 跳过 head.fc 相关的权重（这些会因为类别数不同而不兼容）
+                            if 'head.fc' not in k:
+                                filtered_state_dict[k] = v
+                            else:
+                                print(f"  跳过权重: {k} (类别数不匹配)")
+                        
+                        self.backbone.load_state_dict(filtered_state_dict, strict=False)
+                        print(f"✓ 权重加载成功")
+                    except Exception as e:
+                        print(f"⚠ 权重加载失败: {e}")
+                        print(f"  使用随机初始化的模型")
                 else:
-                    raise ValueError(f"Unknown ConvNeXtV2 type: {sub_type}")
+                    # 本地权重不存在，使用随机初始化
+                    print(f"⚠ 本地权重不存在: {timm_model_name}")
+                    print(f"  使用随机初始化的模型")
+                    self.backbone = timm.create_model(timm_model_name, pretrained=False, num_classes=num_classes)
                 
                 # 适配输入通道数
                 if in_channels != 3:
@@ -400,6 +437,18 @@ class ModelClassifier(nn.Module):
             
         else:
             raise ValueError(f"Unknown model type: {model_type}")
+    
+    def _get_local_weight(self, model_name, pretrained):
+        """获取本地权重文件路径"""
+        if not pretrained or not Config.PRETRAINED_WEIGHTS_DIR:
+            return None
+        
+        weights_dir = Path(Config.PRETRAINED_WEIGHTS_DIR).absolute()
+        local_weight = weights_dir / f"{model_name}.safetensors"
+        
+        if local_weight.exists():
+            return str(local_weight)
+        return None
     
     def forward(self, x):
         return self.backbone(x)

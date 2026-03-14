@@ -3,26 +3,28 @@ import os
 class Config:
     # 数据路径
     # DATA_ROOT = r"c:\Users\jangb\Desktop\contest_group\data\APS_dataset"
-    DATA_ROOT = "/data2/jiangwb/eff/data/APS_dataset"
+    # DATA_ROOT = "/data2/jiangwb/eff/data/APS_dataset"
     # DATA_ROOT = "data/APS_dataset"
+    DATA_ROOT = "../data/APS_dataset"
     TRAIN_DIR = os.path.join(DATA_ROOT, "train")
     TEST_DIR = os.path.join(DATA_ROOT, "val_noclass")  # 无标签测试集
     CLASSNAME_FILE = os.path.join(DATA_ROOT, "classname.txt")
     
     # 模型保存路径
     # CHECKPOINT_DIR = r"c:\Users\jangb\Desktop\contest_group\train_eff\checkpoints2"
-    CHECKPOINT_DIR = "/data2/jiangwb/eff/checkpoints"
-    # CHECKPOINT_DIR = "checkpoints"
+    # CHECKPOINT_DIR = "/data2/jiangwb/eff/checkpoints"
+    CHECKPOINT_DIR = "eff/checkpoints_base1"
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     
     # 预训练权重下载缓存路径
     # 默认为 ~/.cache/torch/hub/checkpoints
     # 可以修改为自定义路径，例如: "/data2/jiangwb/eff/pretrained_weights"
-    PRETRAINED_WEIGHTS_DIR = "/data2/jiangwb/eff/pretrained_weights"  # 设为 None 时使用 PyTorch 默认路径
+    PRETRAINED_WEIGHTS_DIR = 'eff/pretrained_weights'  # 相对路径（本地测试用）
+    # PRETRAINED_WEIGHTS_DIR = "/data2/jiangwb/eff/pretrained_weights"  # 集群上用绝对路径
     
     # 训练参数
-    BATCH_SIZE = 32
-    NUM_EPOCHS = 35
+    BATCH_SIZE = 64
+    NUM_EPOCHS = 25
     LEARNING_RATE = 0.8e-4
     WEIGHT_DECAY = 0.8e-4
     
@@ -36,6 +38,10 @@ class Config:
     
     # 设备
     DEVICE = "cuda"
+    
+    # 多GPU配置
+    USE_MULTI_GPU = True           # 是否使用多GPU训练
+    GPU_IDS = [0, 1]              # 使用的GPU索引（例：[0, 1] 表示使用第0和第1块GPU）
     
     # 随机种子
     SEED = 42
@@ -75,6 +81,10 @@ class Config:
     USE_CLASS_ALPHA = True     # 是否按类别频率自动计算 alpha 权重
 
     # 数据增强配置（batch级别）
-    AUG_TYPE = 'mixup'   # 'none' | 'mixup' | 'cutmix' | 'both'(随机选一种)
+    AUG_TYPE = 'cutmix'   # 'none' | 'mixup' | 'cutmix' | 'both'(随机选一种)
     AUG_ALPHA = 1.0       # Beta分布参数：mixup推荐0.4，cutmix推荐1.0
     AUG_PROB = 0.5        # 每个batch执行增强的概率
+
+    # 错误样本保存配置
+    SAVE_ERROR_SAMPLES = True  # 是否保存验证错误的样本图片
+    ERROR_SAMPLES_DIR = "eff/checkpoints_base1/error_samples"  # 错误样本保存母文件夹

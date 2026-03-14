@@ -15,6 +15,7 @@ import torch.optim as optim
 from tqdm import tqdm
 import random
 import numpy as np
+from sklearn.metrics import f1_score
 
 # 添加项目路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -24,7 +25,8 @@ from dataset import get_dataloaders
 from model import build_model
 from utils import (
     set_seed, save_checkpoint, load_checkpoint,
-    AverageMeter, accuracy, log_training, get_current_time
+    AverageMeter, accuracy, log_training, get_current_time,
+    save_error_samples
 )
 from metrics import compute_class_metrics, print_class_metrics, print_confusion_matrix
 
@@ -74,9 +76,10 @@ def validate(model, val_loader, criterion, device, num_classes, class_names=None
     
     all_preds = []
     all_labels = []
+    error_samples = []  # 记录错误样本
     
     pbar = tqdm(val_loader, desc="[Validate]")
-    for images, labels, _ in pbar:
+    for images, labels, img_paths in pbar:
         images = images.to(device)
         labels = labels.to(device)
         
@@ -96,6 +99,19 @@ def validate(model, val_loader, criterion, device, num_classes, class_names=None
         all_preds.extend(preds.cpu().numpy())
         all_labels.extend(labels.cpu().numpy())
         
+        # 记录错误样本
+        probs = torch.softmax(outputs, dim=1)
+        max_probs = probs.max(dim=1)
+        
+        for pred, label, img_path, max_prob in zip(preds.cpu().numpy(), labels.cpu().numpy(), img_paths, max_probs.values.cpu().numpy()):
+            if pred != label:
+                error_samples.append({
+                    'img_path': img_path,
+                    'pred_label': int(pred),
+                    'true_label': int(label),
+                    'confidence': float(max_prob)
+                })
+        
         # 更新进度条
         pbar.set_postfix({
             'Loss': f'{losses.avg:.4f}',
@@ -105,7 +121,7 @@ def validate(model, val_loader, criterion, device, num_classes, class_names=None
     # 计算每个类别的指标
     metrics_dict = compute_class_metrics(all_preds, all_labels, num_classes, class_names)
     
-    return losses.avg, top1.avg, all_preds, all_labels, metrics_dict
+    return losses.avg, top1.avg, all_preds, all_labels, metrics_dict, error_samples
 
 
 def train_single_model(config, model_id, seed=None):
@@ -153,6 +169,14 @@ def train_single_model(config, model_id, seed=None):
     model = build_model(config)
     model = model.to(device)
     
+    # 多GPU配置
+    if getattr(config, 'USE_MULTI_GPU', False) and torch.cuda.device_count() > 1:
+        gpu_ids = getattr(config, 'GPU_IDS', list(range(torch.cuda.device_count())))
+        print(f"Using DataParallel with GPUs: {gpu_ids}")
+        model = nn.DataParallel(model, device_ids=gpu_ids)
+    else:
+        print(f"Using single GPU/device: {device}")
+    
     # 定义损失函数和优化器
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(
@@ -169,13 +193,14 @@ def train_single_model(config, model_id, seed=None):
     
     # 训练参数
     best_acc = 0.0
+    best_macro_f1 = 0.0
     start_epoch = 0
     
     # 检查是否有检查点可以恢复
     checkpoint_path = os.path.join(model_dir, 'latest.pth')
     if config.RESUME and os.path.exists(checkpoint_path):
         print(f"Resuming from checkpoint: {checkpoint_path}")
-        start_epoch, best_acc = load_checkpoint(model, optimizer, checkpoint_path, device)
+        start_epoch, best_acc, best_macro_f1 = load_checkpoint(model, optimizer, checkpoint_path, device)
         start_epoch += 1
     elif os.path.exists(checkpoint_path):
         print(f"Checkpoint found but RESUME is disabled. Starting fresh training.")
@@ -195,8 +220,10 @@ def train_single_model(config, model_id, seed=None):
         
         # 验证
         val_loss, val_acc = None, None
+        val_macro_f1 = None
+        error_samples = []
         if val_loader:
-            val_loss, val_acc, all_preds, all_labels, metrics_dict = validate(
+            val_loss, val_acc, all_preds, all_labels, metrics_dict, error_samples = validate(
                 model, val_loader, criterion, device,
                 num_classes=config.NUM_CLASSES,
                 class_names=class_names
@@ -204,6 +231,14 @@ def train_single_model(config, model_id, seed=None):
             
             # 打印类别级指标
             print_class_metrics(metrics_dict, class_names)
+            
+            # 计算 macro-F1
+            val_macro_f1 = f1_score(all_labels, all_preds, average='macro', zero_division=0)
+            
+            # 保存错误样本图片
+            if getattr(config, 'SAVE_ERROR_SAMPLES', False) and error_samples:
+                error_samples_dir = os.path.join(getattr(config, 'ERROR_SAMPLES_DIR', 'eff/error_samples'), f'model_{model_id}')
+                save_error_samples(epoch+1, error_samples, error_samples_dir, class_names)
         
         # 更新学习率
         scheduler.step()
@@ -217,28 +252,39 @@ def train_single_model(config, model_id, seed=None):
         )
         
         # 保存检查点
-        is_best = val_acc is not None and val_acc > best_acc
-        if is_best:
+        is_best_acc = val_acc is not None and val_acc > best_acc
+        is_best_macro_f1 = val_macro_f1 is not None and val_macro_f1 > best_macro_f1
+        
+        if is_best_acc:
             best_acc = val_acc
             save_checkpoint(
-                model, optimizer, epoch, best_acc,
-                os.path.join(model_dir, 'best.pth')
+                model, optimizer, epoch, best_acc, best_macro_f1,
+                os.path.join(model_dir, 'best_acc.pth')
+            )
+        
+        if is_best_macro_f1:
+            best_macro_f1 = val_macro_f1
+            save_checkpoint(
+                model, optimizer, epoch, best_acc, best_macro_f1,
+                os.path.join(model_dir, 'best_macro_f1.pth')
             )
         
         # 保存最新检查点
         save_checkpoint(
-            model, optimizer, epoch, best_acc,
+            model, optimizer, epoch, best_acc, best_macro_f1,
             os.path.join(model_dir, 'latest.pth')
         )
         
         print(f"Best accuracy so far: {best_acc:.2f}%")
     
     print(f"\n{'='*50}")
-    print(f"Model {model_id} training completed! Best accuracy: {best_acc:.2f}%")
+    print(f"Model {model_id} training completed!")
+    print(f"Best accuracy: {best_acc:.2f}% (saved to best_acc.pth)")
+    print(f"Best macro-F1: {best_macro_f1:.4f} (saved to best_macro_f1.pth)")
     print(f"Model saved to: {model_dir}")
     print(f"{'='*50}\n")
     
-    return best_acc, os.path.join(model_dir, 'best.pth')
+    return best_acc, os.path.join(model_dir, 'best_acc.pth')
 
 
 def train_multiple_models(base_config=None):
