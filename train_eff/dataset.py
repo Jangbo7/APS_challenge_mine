@@ -373,18 +373,30 @@ def get_transforms(is_train=True, image_size=224, use_freq_channels=False, low_p
         return transforms.Compose(transforms_list)
 
 
-def split_dataset_stratified(dataset, val_ratio=0.2, seed=42):
+def split_dataset_stratified(dataset, val_ratio=0.2, seed=42, start=None):
     """
     按类别分层分割数据集
     
     Args:
         dataset: 原始数据集
         val_ratio: 验证集比例
-        seed: 随机种子
+        seed: 随机种子（仅在 start=None 时生效）
+        start: 验证集起始位置比例
+               - None: 随机分割（按seed打乱）
+               - n(0~1): 固定分割（每个类别内从比例位置开始切片）
     
     Returns:
         train_indices, val_indices: 训练集和验证集的索引
     """
+    if start is not None:
+        try:
+            start = float(start)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("start must be None or a float in [0, 1]") from exc
+
+        if not (0.0 <= start <= 1.0):
+            raise ValueError("start must be in [0, 1]")
+
     random.seed(seed)
     
     # 按类别分组索引
@@ -399,10 +411,22 @@ def split_dataset_stratified(dataset, val_ratio=0.2, seed=42):
     
     # 对每个类别进行分割
     for label, indices in class_to_indices.items():
-        random.shuffle(indices)
         val_size = int(len(indices) * val_ratio)
-        val_indices.extend(indices[:val_size])
-        train_indices.extend(indices[val_size:])
+
+        if start is None:
+            indices_copy = indices.copy()
+            random.shuffle(indices_copy)
+            val_indices.extend(indices_copy[:val_size])
+            train_indices.extend(indices_copy[val_size:])
+        else:
+            if len(indices) == 0:
+                continue
+
+            # 固定模式：每个类别独立处理，在类内按起始比例做环形切片
+            start_idx = int(len(indices) * start) % len(indices)
+            ordered_indices = indices[start_idx:] + indices[:start_idx]
+            val_indices.extend(ordered_indices[:val_size])
+            train_indices.extend(ordered_indices[val_size:])
     
     return train_indices, val_indices
 
@@ -458,12 +482,18 @@ def undersample_train_set(full_train_dataset, train_indices, max_samples_per_cla
     return undersampled_train_indices, class_stats
 
 
-def get_dataloaders(config):
+def get_dataloaders(config, split_start=None):
     """
     获取数据加载器
     
     从训练集中分割验证集，val_noclass 作为无标签测试集
     支持对训练集进行下采样（每个类别最多100个样本）
+
+    Args:
+        config: 配置对象
+        split_start: 验证集起始比例
+                    - None: 随机分层分割
+                    - n(0~1): 固定分层分割（每个类别独立处理）
     """
     with open(config.CLASSNAME_FILE, 'r', encoding='utf-8') as f:
         class_names = [line.strip() for line in f.readlines()]
@@ -479,12 +509,18 @@ def get_dataloaders(config):
     )
     
     print(f"Total training samples: {len(full_train_dataset)}")
+
+    if split_start is None:
+        print(f"Using random stratified split (seed={config.SEED})")
+    else:
+        print(f"Using fixed stratified split (class-wise start={split_start:.4f})")
     
     # 分层分割训练集和验证集
     train_indices, val_indices = split_dataset_stratified(
         full_train_dataset,
         val_ratio=config.VAL_SPLIT,
-        seed=config.SEED
+        seed=config.SEED,
+        start=split_start
     )
     
     print(f"Training samples after split: {len(train_indices)}")

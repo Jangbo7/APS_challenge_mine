@@ -13,7 +13,7 @@ class Config:
     # 模型保存路径
     # CHECKPOINT_DIR = r"c:\Users\jangb\Desktop\contest_group\train_eff\checkpoints2"
     # CHECKPOINT_DIR = "/data2/jiangwb/eff/checkpoints"
-    CHECKPOINT_DIR = "eff/checkpoints_base1"
+    CHECKPOINT_DIR = "eff/checkpoints_base_bag"
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     
     # 预训练权重下载缓存路径
@@ -65,11 +65,11 @@ class Config:
     
     # 集成学习配置
     # 要训练的模型数量
-    NUM_ENSEMBLE_MODELS = 10
+    NUM_ENSEMBLE_MODELS = 5
     # 是否在训练完成后自动运行集成预测
     AUTO_PREDICT_ENSEMBLE = True
     # 集成预测策略: 'average' (平均), 'voting' (投票), 'weighted' (加权)
-    ENSEMBLE_STRATEGY = 'voting'
+    ENSEMBLE_STRATEGY = 'average'
     
     # 是否自动恢复训练（从最新的检查点继续）
     RESUME = False
@@ -87,4 +87,4 @@ class Config:
 
     # 错误样本保存配置
     SAVE_ERROR_SAMPLES = True  # 是否保存验证错误的样本图片
-    ERROR_SAMPLES_DIR = "eff/checkpoints_base1/error_samples"  # 错误样本保存母文件夹
+    ERROR_SAMPLES_DIR = "eff/checkpoints_base_bag/error_samples"  # 错误样本保存母文件夹

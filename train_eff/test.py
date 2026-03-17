@@ -142,7 +142,8 @@ def main():
     model = build_model(config)
     model = model.to(device)
     
-    checkpoint_path = os.path.join(config.CHECKPOINT_DIR, 'best.pth')
+    # checkpoint_path = os.path.join(config.CHECKPOINT_DIR, 'best.pth')
+    checkpoint_path = os.path.join(config.CHECKPOINT_DIR, 'best_macro_f1.pth')
     if not os.path.exists(checkpoint_path):
         checkpoint_path = os.path.join(config.CHECKPOINT_DIR, 'latest.pth')
     

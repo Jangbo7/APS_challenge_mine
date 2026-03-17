@@ -1,5 +1,6 @@
 import os
 import torch
+import torch.nn as nn
 import random
 import numpy as np
 from datetime import datetime
@@ -23,13 +24,20 @@ def get_current_time():
     return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
-def save_checkpoint(model, optimizer, epoch, best_acc, best_macro_f1=None, filepath=None):
+def _is_parallel_model(model):
+    return isinstance(model, (nn.DataParallel, nn.parallel.DistributedDataParallel))
+
+
+def save_checkpoint(model, optimizer, epoch, best_acc, best_macro_f1=None, filepath=None, verbose=True):
     """保存模型检查点"""
-    # 处理DataParallel模型
+    # 处理并行模型（DataParallel / DistributedDataParallel）
     model_state = model.state_dict()
-    if isinstance(model, torch.nn.DataParallel):
+    if _is_parallel_model(model):
         # 移除 "module." 前缀
-        model_state = {k.replace('module.', ''): v for k, v in model_state.items()}
+        model_state = {
+            (k[7:] if k.startswith('module.') else k): v
+            for k, v in model_state.items()
+        }
     
     checkpoint = {
         'epoch': epoch,
@@ -39,16 +47,17 @@ def save_checkpoint(model, optimizer, epoch, best_acc, best_macro_f1=None, filep
         'best_macro_f1': best_macro_f1 if best_macro_f1 is not None else 0.0,
     }
     torch.save(checkpoint, filepath)
-    print(f"Checkpoint saved: {filepath}")
+    if verbose:
+        print(f"Checkpoint saved: {filepath}")
 
 
-def load_checkpoint(model, optimizer, filepath, device='cuda'):
+def load_checkpoint(model, optimizer, filepath, device='cuda', verbose=True):
     """加载模型检查点"""
     checkpoint = torch.load(filepath, map_location=device)
     model_state = checkpoint['model_state_dict']
     
-    # 处理DataParallel模型的加载
-    if isinstance(model, torch.nn.DataParallel):
+    # 处理并行模型（DataParallel / DistributedDataParallel）的加载
+    if _is_parallel_model(model):
         # 如果state_dict没有"module."前缀，添加它
         if not any(k.startswith('module.') for k in model_state.keys()):
             model_state = {f'module.{k}': v for k, v in model_state.items()}
@@ -56,7 +65,10 @@ def load_checkpoint(model, optimizer, filepath, device='cuda'):
     else:
         # 如果state_dict有"module."前缀，移除它
         if any(k.startswith('module.') for k in model_state.keys()):
-            model_state = {k.replace('module.', ''): v for k, v in model_state.items()}
+            model_state = {
+                (k[7:] if k.startswith('module.') else k): v
+                for k, v in model_state.items()
+            }
         model.load_state_dict(model_state)
     
     if optimizer is not None:
@@ -64,7 +76,8 @@ def load_checkpoint(model, optimizer, filepath, device='cuda'):
     epoch = checkpoint.get('epoch', 0)
     best_acc = checkpoint.get('best_acc', 0.0)
     best_macro_f1 = checkpoint.get('best_macro_f1', 0.0)
-    print(f"Checkpoint loaded: {filepath}, Epoch: {epoch}, Best Acc: {best_acc:.4f}, Best Macro-F1: {best_macro_f1:.4f}")
+    if verbose:
+        print(f"Checkpoint loaded: {filepath}, Epoch: {epoch}, Best Acc: {best_acc:.4f}, Best Macro-F1: {best_macro_f1:.4f}")
     return epoch, best_acc, best_macro_f1
 
 

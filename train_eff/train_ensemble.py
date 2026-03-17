@@ -124,7 +124,7 @@ def validate(model, val_loader, criterion, device, num_classes, class_names=None
     return losses.avg, top1.avg, all_preds, all_labels, metrics_dict, error_samples
 
 
-def train_single_model(config, model_id, seed=None):
+def train_single_model(config, model_id, seed=None, split_start=None):
     """
     训练单个模型
     
@@ -132,6 +132,7 @@ def train_single_model(config, model_id, seed=None):
         config: 配置对象
         model_id: 模型ID（用于区分不同模型）
         seed: 随机种子（如果为None，则使用config.SEED + model_id）
+        split_start: 验证集固定切分起点比例（None表示随机切分）
     
     Returns:
         best_acc: 最佳准确率
@@ -159,7 +160,12 @@ def train_single_model(config, model_id, seed=None):
     
     # 加载数据
     print("Loading data...")
-    train_loader, val_loader, class_names = get_dataloaders(config)
+    if split_start is None:
+        print(f"Data split mode: random (seed={config.SEED})")
+    else:
+        print(f"Data split mode: fixed class-wise split (start={split_start:.4f})")
+
+    train_loader, val_loader, class_names = get_dataloaders(config, split_start=split_start)
     print(f"Number of classes: {len(class_names)}")
     print(f"Train samples: {len(train_loader.dataset)}")
     print(f"Val samples: {len(val_loader.dataset)}")
@@ -309,15 +315,23 @@ def train_multiple_models(base_config=None):
     results = []
     
     for model_id in range(num_models):
+        split_start = model_id / num_models if num_models > 0 else 0.0
+
         print(f"\n{'#'*80}")
         print(f"# Model {model_id + 1}/{num_models}")
+        print(f"# Split start: {split_start:.4f}")
         print(f"{'#'*80}")
         
-        best_acc, model_path = train_single_model(base_config, model_id)
+        best_acc, model_path = train_single_model(
+            base_config,
+            model_id,
+            split_start=split_start
+        )
         
         results.append({
             'model_id': model_id,
             'seed': base_config.SEED + model_id,
+            'split_start': split_start,
             'best_acc': best_acc,
             'model_path': model_path
         })
@@ -326,11 +340,14 @@ def train_multiple_models(base_config=None):
     print("\n" + "="*80)
     print("Training Summary")
     print("="*80)
-    print(f"{'Model ID':<10} {'Seed':<10} {'Best Acc':<15} {'Model Path'}")
+    print(f"{'Model ID':<10} {'Seed':<10} {'Split':<10} {'Best Acc':<15} {'Model Path'}")
     print("-"*80)
     
     for result in results:
-        print(f"{result['model_id']:<10} {result['seed']:<10} {result['best_acc']:.2f}%{'':<10} {result['model_path']}")
+        print(
+            f"{result['model_id']:<10} {result['seed']:<10} "
+            f"{result['split_start']:<10.4f} {result['best_acc']:.2f}%{'':<10} {result['model_path']}"
+        )
     
     avg_acc = np.mean([r['best_acc'] for r in results])
     std_acc = np.std([r['best_acc'] for r in results])
@@ -344,10 +361,13 @@ def train_multiple_models(base_config=None):
     with open(results_file, 'w') as f:
         f.write("Model Training Results for Ensemble\n")
         f.write("="*80 + "\n")
-        f.write(f"{'Model ID':<10} {'Seed':<10} {'Best Acc':<15} {'Model Path'}\n")
+        f.write(f"{'Model ID':<10} {'Seed':<10} {'Split':<10} {'Best Acc':<15} {'Model Path'}\n")
         f.write("-"*80 + "\n")
         for result in results:
-            f.write(f"{result['model_id']:<10} {result['seed']:<10} {result['best_acc']:.2f}%{'':<10} {result['model_path']}\n")
+            f.write(
+                f"{result['model_id']:<10} {result['seed']:<10} "
+                f"{result['split_start']:<10.4f} {result['best_acc']:.2f}%{'':<10} {result['model_path']}\n"
+            )
         f.write("-"*80 + "\n")
         f.write(f"Average Accuracy: {avg_acc:.2f}% ± {std_acc:.2f}%\n")
         f.write("="*80 + "\n")
