@@ -91,6 +91,7 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device, epoch, co
     occamix_mask_only_ratio = getattr(config, 'OCCAMIX_MASK_ONLY_RATIO', 0.0)
     occamix_mask_background = getattr(config, 'OCCAMIX_MASK_BACKGROUND', 'zero')
     occamix_mask_single_label = getattr(config, 'OCCAMIX_MASK_ONLY_USE_SINGLE_LABEL', True)
+    occamix_mask_only_topk_sp = getattr(config, 'OCCAMIX_MASK_ONLY_TOPK_SUPERPIXELS_PER_BLOCK', 4)
     
     preview_enable = getattr(config, "SAVE_AUG_PREVIEW", True)
     preview_max_batches = getattr(config, "SAVE_AUG_PREVIEW_MAX_BATCHES", 2)
@@ -137,6 +138,7 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device, epoch, co
                     compactness=occamix_compactness,
                     mask_only_ratio=occamix_mask_only_ratio,
                     mask_background=occamix_mask_background,
+                    mask_only_topk_superpixels_per_block=occamix_mask_only_topk_sp,
                 )
                 if isinstance(mask_only_flags, torch.Tensor):
                     mask_only_total += int(mask_only_flags.sum().item())
@@ -335,6 +337,7 @@ def main():
         print(f"OcCaMix seg min: {config.OCCAMIX_SEG_MIN}")
         print(f"OcCaMix seg max: {config.OCCAMIX_SEG_MAX}")
         print(f"OcCaMix compactness: {config.OCCAMIX_COMPACTNESS}")
+        print(f"OcCaMix mask-only topk superpixels/block: {getattr(config, 'OCCAMIX_MASK_ONLY_TOPK_SUPERPIXELS_PER_BLOCK', 4)}")
 
     
     # 多GPU配置

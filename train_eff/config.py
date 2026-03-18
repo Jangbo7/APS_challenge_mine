@@ -93,6 +93,7 @@ class Config:
     OCCAMIX_MASK_ONLY_RATIO = 0.3  # 在occamix触发样本中，直接使用注意力超像素输入的比例
     OCCAMIX_MASK_BACKGROUND = 'zero'  # mask-only背景填充策略: 'zero'
     OCCAMIX_MASK_ONLY_USE_SINGLE_LABEL = True  # mask-only样本仅使用原标签单损失
+    OCCAMIX_MASK_ONLY_TOPK_SUPERPIXELS_PER_BLOCK = 4  # mask-only中每个注意力块选取Top-K超像素，增大保留面积
 
     # 错误样本保存配置
     SAVE_ERROR_SAMPLES = True  # 是否保存验证错误的样本图片

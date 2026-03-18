@@ -107,6 +107,7 @@ def occamix_data(
     compactness: float = 10.0,
     mask_only_ratio: float = 0.0,
     mask_background: str = 'zero',
+    mask_only_topk_superpixels_per_block: int = 4,
 ):
     """
     OcCaMix 数据增强（基于 attentive superpixel 的像素级混合）
@@ -121,6 +122,7 @@ def occamix_data(
         compactness: SLIC 紧致度
         mask_only_ratio: 在 occamix 样本中使用“仅保留注意力超像素输入”的比例
         mask_background: mask-only 背景填充策略，当前支持 'zero'
+        mask_only_topk_superpixels_per_block: mask-only 样本中，每个注意力块选择的超像素数量
 
     Returns:
         mixed_images: [B, C, H, W]
@@ -169,9 +171,13 @@ def occamix_data(
     map_topn_col = (map_topn_idx % w_fmap).cpu().numpy()
 
     mask_only_ratio = float(max(0.0, min(1.0, mask_only_ratio)))
+    mask_only_topk_superpixels_per_block = max(1, int(mask_only_topk_superpixels_per_block))
     lam_batch = []
     mask_only_flags = []
     for i in range(bsz):
+        use_mask_only = (np.random.rand() < mask_only_ratio)
+        per_block_topk = mask_only_topk_superpixels_per_block if use_mask_only else 1
+
         img_seg = images[rand_idx[i]].detach().permute(1, 2, 0).cpu().numpy()  # H,W,C
         n_seg = random.randint(int(n_seg_min), int(n_seg_max))
         segments_img_map = segmentation.slic(
@@ -205,8 +211,7 @@ def occamix_data(
             if seg_labels.size == 0:
                 continue
 
-            best_overlap = -1.0
-            best_superpixel_mask = None
+            overlap_candidates = []
 
             for seg_label in seg_labels:
                 superpixel_mask = segments_img_map == seg_label
@@ -217,15 +222,15 @@ def occamix_data(
                 overlap = np.logical_and(atten_mask, superpixel_mask).sum()
                 overlap_pct = overlap / superpixel_area
 
-                if overlap_pct > best_overlap:
-                    best_overlap = overlap_pct
-                    best_superpixel_mask = superpixel_mask
+                overlap_candidates.append((overlap_pct, superpixel_mask))
 
-            if best_superpixel_mask is not None:
-                selected_mask |= best_superpixel_mask
+            if overlap_candidates:
+                overlap_candidates.sort(key=lambda x: x[0], reverse=True)
+                topk_candidates = overlap_candidates[:per_block_topk]
+                for _, chosen_superpixel_mask in topk_candidates:
+                    selected_mask |= chosen_superpixel_mask
 
         mix_pixel_count = int(selected_mask.sum())
-        use_mask_only = (np.random.rand() < mask_only_ratio)
         mask_only_flags.append(use_mask_only)
 
         if mix_pixel_count > 0:
