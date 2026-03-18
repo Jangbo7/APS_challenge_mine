@@ -96,6 +96,8 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device, epoch, co
     preview_max_batches = getattr(config, "SAVE_AUG_PREVIEW_MAX_BATCHES", 2)
     preview_max_samples = getattr(config, "SAVE_AUG_PREVIEW_MAX_SAMPLES", 4)
     preview_saved_batches = 0
+    mask_only_total = 0
+    occamix_total = 0
 
     pbar = tqdm(train_loader, desc=f"Epoch {epoch} [Train]")
     for batch_idx, (images, labels, _) in enumerate(pbar):
@@ -136,6 +138,9 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device, epoch, co
                     mask_only_ratio=occamix_mask_only_ratio,
                     mask_background=occamix_mask_background,
                 )
+                if isinstance(mask_only_flags, torch.Tensor):
+                    mask_only_total += int(mask_only_flags.sum().item())
+                    occamix_total += int(mask_only_flags.numel())
             else:
                 raise ValueError(f"Unknown augmentation type: {chosen}")
 
@@ -235,7 +240,8 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device, epoch, co
             )
             preview_saved_batches += 1
     
-    return losses.avg, top1.avg
+    mask_only_ratio_epoch = (mask_only_total / occamix_total) if occamix_total > 0 else 0.0
+    return losses.avg, top1.avg, mask_only_ratio_epoch
 
 
 @torch.no_grad()
@@ -396,9 +402,11 @@ def main():
         print(f"Learning rate: {optimizer.param_groups[0]['lr']:.6f}")
         
         # 训练
-        train_loss, train_acc = train_one_epoch(
+        train_loss, train_acc, mask_only_ratio_epoch = train_one_epoch(
             model, train_loader, criterion, optimizer, device, epoch+1, config
         )
+        if config.AUG_TYPE == 'occamix_with_mask_only':
+            print(f"Mask-only ratio this epoch: {mask_only_ratio_epoch:.3f}")
         
         # 验证
         val_loss, val_acc = None, None
