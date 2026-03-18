@@ -449,15 +449,40 @@ class ModelClassifier(nn.Module):
             raise ValueError(f"Unknown model type: {model_type}")
     
     def _get_local_weight(self, model_name, pretrained):
-        """获取本地权重文件路径"""
+        """获取本地权重文件路径（支持扁平路径 + HF/timm snapshots 结构）"""
         if not pretrained or not Config.PRETRAINED_WEIGHTS_DIR:
             return None
-        
-        weights_dir = Path(Config.PRETRAINED_WEIGHTS_DIR).absolute()
-        local_weight = weights_dir / f"{model_name}.safetensors"
-        
-        if local_weight.exists():
-            return str(local_weight)
+
+        base = Path(Config.PRETRAINED_WEIGHTS_DIR).expanduser().resolve()
+
+        # 1) 配置本身就是一个具体文件
+        if base.is_file() and base.suffix == ".safetensors":
+            return str(base)
+
+        if not base.exists():
+            return None
+
+        # 2) 兼容原有扁平命名: {PRETRAINED_WEIGHTS_DIR}/{model_name}.safetensors
+        flat_file = base / f"{model_name}.safetensors"
+        if flat_file.exists():
+            return str(flat_file)
+
+        # 3) 兼容 HF/timm 缓存结构:
+        # {base}/hub/models--timm--{model_name}/snapshots/<hash>/model.safetensors
+        hf_snapshot_files = list(
+            (base / "hub" / f"models--timm--{model_name}" / "snapshots").glob("*/model.safetensors")
+        )
+        if hf_snapshot_files:
+            # 选最新修改时间的快照文件
+            latest = max(hf_snapshot_files, key=lambda p: p.stat().st_mtime)
+            return str(latest)
+
+        # 4) 兜底：递归搜索路径中包含 model_name 的 safetensors 文件
+        # （适配自定义目录层级）
+        for p in base.rglob("*.safetensors"):
+            if model_name in str(p):
+                return str(p)
+
         return None
 
     def get_spatial_feature_map(self, x: torch.Tensor) -> torch.Tensor:
