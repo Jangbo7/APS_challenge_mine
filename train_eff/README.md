@@ -290,6 +290,7 @@ python train.py
 - pandas
 - Pillow
 - timm (仅当使用 ConvNeXtV2 模型时需要)
+- scikit-image (仅当使用 OcCaMix 增强时需要)
 
 **安装命令：**
 ```bash
@@ -298,6 +299,9 @@ pip install torch torchvision tqdm pandas Pillow
 
 # 如需使用 ConvNeXtV2 模型
 pip install timm
+
+# 如需使用 OcCaMix 增强
+pip install scikit-image
 ```
 
 ## 类别信息

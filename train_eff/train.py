@@ -1,9 +1,12 @@
 import os
-import sys
-
+import math
 import torch
+from torchvision.utils import save_image
+from pathlib import Path
+
 import numpy as np
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from tqdm import tqdm
 from sklearn.metrics import f1_score
@@ -11,7 +14,7 @@ from loss import FocalLoss
 from config import Config
 from dataset import get_dataloaders
 from model import build_model
-from augmentation import mixup_data, cutmix_data, mixed_criterion
+from augmentation import mixup_data, cutmix_data, occamix_data, mixed_criterion
 from utils import (
     set_seed, save_checkpoint, load_checkpoint,
     AverageMeter, accuracy, log_training, get_current_time,
@@ -23,7 +26,55 @@ from metrics import (
 )
 
 
-def train_one_epoch(model, train_loader, criterion, optimizer, device, epoch,config):
+def save_aug_preview_batch(
+    images_orig: torch.Tensor,
+    images_aug: torch.Tensor,
+    labels_a: torch.Tensor,
+    labels_b: torch.Tensor,
+    lam,
+    epoch: int,
+    batch_idx: int,
+    aug_type: str,
+    save_root: str,
+    max_samples: int = 4,
+):
+    """
+    保存一个batch中的若干“原图/增强图”对照图。
+    输出图每张包含2列：左原图，右增强图。
+    """
+    out_dir = Path(save_root) / "aug_preview" / f"epoch_{epoch:03d}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    bsz = images_orig.size(0)
+    n = min(max_samples, bsz)
+
+    # lam 可能是标量（cutmix/mixup）或向量（occamix）
+    lam_is_tensor = torch.is_tensor(lam)
+
+    for i in range(n):
+        lam_i = float(lam[i].item()) if lam_is_tensor else float(lam)
+        la = int(labels_a[i].item())
+        lb = int(labels_b[i].item())
+
+        pair = torch.stack(
+            [images_orig[i].detach().cpu(), images_aug[i].detach().cpu()], dim=0
+        )  # [2, C, H, W]
+
+        fname = (
+            f"{aug_type}_e{epoch:03d}_b{batch_idx:04d}_i{i:02d}"
+            f"_la{la}_lb{lb}_lam{lam_i:.3f}.png"
+        )
+        save_path = out_dir / fname
+
+        save_image(
+            pair,
+            str(save_path),
+            nrow=2,            # 左原图，右增强图
+            normalize=True,    # 便于直接查看
+        )
+
+
+def train_one_epoch(model, train_loader, criterion, optimizer, device, epoch, config):
     """训练一个 epoch"""
     model.train()
     losses = AverageMeter()
@@ -33,32 +84,99 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device, epoch,con
     aug_type = getattr(config, 'AUG_TYPE', 'none')
     aug_alpha = getattr(config, 'AUG_ALPHA', 1.0)
     aug_prob = getattr(config, 'AUG_PROB', 0.5)
+    occamix_n = getattr(config, 'OCCAMIX_N', 6)
+    occamix_seg_min = getattr(config, 'OCCAMIX_SEG_MIN', 20)
+    occamix_seg_max = getattr(config, 'OCCAMIX_SEG_MAX', 50)
+    occamix_compactness = getattr(config, 'OCCAMIX_COMPACTNESS', 10.0)
     
+    preview_enable = getattr(config, "SAVE_AUG_PREVIEW", True)
+    preview_max_batches = getattr(config, "SAVE_AUG_PREVIEW_MAX_BATCHES", 2)
+    preview_max_samples = getattr(config, "SAVE_AUG_PREVIEW_MAX_SAMPLES", 4)
+    preview_saved_batches = 0
+
     pbar = tqdm(train_loader, desc=f"Epoch {epoch} [Train]")
-    for images, labels, _ in pbar:
-        images = images.to(device)
-        labels = labels.to(device)
-        # print(device)
-                # ---- batch 级数据增强 ----
+    for batch_idx, (images, labels, _) in enumerate(pbar):
+        images = images.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True)
+
+        images_orig = images.clone()  # 用于可视化对照
+        labels_a, labels_b, lam = labels, labels, 1.0
+        aug_applied = False
+
+        # ====== 你的增强分支（示例）======
+        # if aug_type == 'cutmix' and torch.rand(1).item() < aug_prob:
+        #     images, labels_a, labels_b, lam = cutmix_data(images, labels, alpha=aug_alpha)
+        #     aug_applied = True
+        #
+        # elif aug_type == 'occamix' and torch.rand(1).item() < aug_prob:
+        #     images, labels_a, labels_b, lam = occamix_data(
+        #         images, labels, model,
+        #         n_top=occamix_n,
+        #         n_seg_max=occamix_seg_max,
+        #         n_seg_min=occamix_seg_min,
+        #         compactness=occamix_compactness,
+        #     )
+        #     aug_applied = True
+        # ================================
+
+        # 增强
         use_aug = (aug_type != 'none') and (np.random.rand() < aug_prob)
+        chosen = 'none'
         if use_aug:
             if aug_type == 'both':
                 # 随机选一种
                 chosen = np.random.choice(['mixup', 'cutmix'])
+            elif aug_type == 'both_all':
+                # 随机选一种（包含 occamix）
+                chosen = np.random.choice(['mixup', 'cutmix', 'occamix'])
             else:
                 chosen = aug_type
 
             if chosen == 'mixup':
                 images, labels_a, labels_b, lam = mixup_data(images, labels, alpha=aug_alpha)
-            else:  # cutmix
+            elif chosen == 'cutmix':
                 images, labels_a, labels_b, lam = cutmix_data(images, labels, alpha=aug_alpha)
-            optimizer.zero_grad()
-            outputs = model(images)
-            loss = mixed_criterion(criterion, outputs, labels_a, labels_b, lam)
+            elif chosen == 'occamix':
+                images, labels_a, labels_b, lam = occamix_data(
+                    images,
+                    labels,
+                    model,
+                    n_top=occamix_n,
+                    n_seg_max=occamix_seg_max,
+                    n_seg_min=occamix_seg_min,
+                    compactness=occamix_compactness,
+                )
+            else:
+                raise ValueError(f"Unknown augmentation type: {chosen}")
+
+            aug_applied = True
+
+        # 前向传播
+        optimizer.zero_grad()
+        outputs = model(images)
+
+        # 计算损失
+        if chosen == 'occamix' and config.LOSS_TYPE == 'cross_entropy' and isinstance(lam, torch.Tensor):
+            lam_batch = lam.to(device=outputs.device, dtype=outputs.dtype).view(-1)
+            loss_a = F.cross_entropy(
+                outputs,
+                labels_a,
+                label_smoothing=config.LABEL_SMOOTHING,
+                reduction='none'
+            )
+            loss_b = F.cross_entropy(
+                outputs,
+                labels_b,
+                label_smoothing=config.LABEL_SMOOTHING,
+                reduction='none'
+            )
+            loss = (lam_batch * loss_a + (1.0 - lam_batch) * loss_b).mean()
+        elif chosen == 'occamix' and isinstance(lam, torch.Tensor):
+            # focal 维持现有接口：退化为 batch 平均比例
+            lam_scalar = float(lam.mean().item())
+            loss = mixed_criterion(criterion, outputs, labels_a, labels_b, lam_scalar)
         else:
-            optimizer.zero_grad()
-            outputs = model(images)
-            loss = criterion(outputs, labels)
+            loss = mixed_criterion(criterion, outputs, labels_a, labels_b, lam)
         
         # 反向传播
         loss.backward()
@@ -76,6 +194,26 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device, epoch,con
             'Loss': f'{losses.avg:.4f}',
             'Acc': f'{top1.avg:.2f}%'
         })
+        
+        # 仅保存前1~2个发生增强的batch
+        if (
+            preview_enable
+            and aug_applied
+            and preview_saved_batches < preview_max_batches
+        ):
+            save_aug_preview_batch(
+                images_orig=images_orig,
+                images_aug=images,
+                labels_a=labels_a,
+                labels_b=labels_b,
+                lam=lam,
+                epoch=epoch,
+                batch_idx=batch_idx,
+                aug_type=aug_type,
+                save_root=config.CHECKPOINT_DIR,
+                max_samples=preview_max_samples,
+            )
+            preview_saved_batches += 1
     
     return losses.avg, top1.avg
 
@@ -162,6 +300,16 @@ def main():
     print(f'Use frequency channels: {config.USE_FREQ_CHANNELS}')
     model = build_model(config)
     model = model.to(device)
+
+    # 数据增强配置
+    print(f"Data augmentation type: {config.AUG_TYPE}")
+    print(f"Augmentation probability: {config.AUG_PROB}")
+    if config.AUG_TYPE == 'occamix':
+        print(f"OcCaMix N: {config.OCCAMIX_N}")
+        print(f"OcCaMix seg min: {config.OCCAMIX_SEG_MIN}")
+        print(f"OcCaMix seg max: {config.OCCAMIX_SEG_MAX}")
+        print(f"OcCaMix compactness: {config.OCCAMIX_COMPACTNESS}")
+
     
     # 多GPU配置
     if getattr(config, 'USE_MULTI_GPU', False) and torch.cuda.device_count() > 1:

@@ -5,7 +5,7 @@ class Config:
     # DATA_ROOT = r"c:\Users\jangb\Desktop\contest_group\data\APS_dataset"
     # DATA_ROOT = "/data2/jiangwb/eff/data/APS_dataset"
     # DATA_ROOT = "data/APS_dataset"
-    DATA_ROOT = "../data/APS_dataset"
+    DATA_ROOT = "./data/APS_dataset"
     TRAIN_DIR = os.path.join(DATA_ROOT, "train")
     TEST_DIR = os.path.join(DATA_ROOT, "val_noclass")  # 无标签测试集
     CLASSNAME_FILE = os.path.join(DATA_ROOT, "classname.txt")
@@ -13,7 +13,7 @@ class Config:
     # 模型保存路径
     # CHECKPOINT_DIR = r"c:\Users\jangb\Desktop\contest_group\train_eff\checkpoints2"
     # CHECKPOINT_DIR = "/data2/jiangwb/eff/checkpoints"
-    CHECKPOINT_DIR = "eff/checkpoints_base_bag"
+    CHECKPOINT_DIR = "eff/checkpoints_base1"
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     
     # 预训练权重下载缓存路径
@@ -81,10 +81,21 @@ class Config:
     USE_CLASS_ALPHA = True     # 是否按类别频率自动计算 alpha 权重
 
     # 数据增强配置（batch级别）
-    AUG_TYPE = 'cutmix'   # 'none' | 'mixup' | 'cutmix' | 'both'(随机选一种)
+    AUG_TYPE = 'occamix'   # 'none' | 'mixup' | 'cutmix' | 'occamix' | 'both'(mixup/cutmix随机) | 'both_all'(三者随机)
     AUG_ALPHA = 1.0       # Beta分布参数：mixup推荐0.4，cutmix推荐1.0
-    AUG_PROB = 0.5        # 每个batch执行增强的概率
+    AUG_PROB = 0.6        # 每个batch执行增强的概率
+
+    # OcCaMix 配置（仅当 AUG_TYPE='occamix' 或 'both_all' 时生效）
+    OCCAMIX_N = 3                 # 减少混合区域，避免覆盖
+    OCCAMIX_SEG_MIN = 40          # 更细粒度，贴合小种子
+    OCCAMIX_SEG_MAX = 80          # 最大粒度，保证细节
+    OCCAMIX_COMPACTNESS = 5.0     # 更贴合轮廓，减少跨区域
 
     # 错误样本保存配置
     SAVE_ERROR_SAMPLES = True  # 是否保存验证错误的样本图片
-    ERROR_SAMPLES_DIR = "eff/checkpoints_base_bag/error_samples"  # 错误样本保存母文件夹
+    ERROR_SAMPLES_DIR = "eff/checkpoints_base1/error_samples"  # 错误样本保存母文件夹
+
+    # ====== 增强可视化保存（用于核验 CutMix / OcCaMix 是否生效）======
+    SAVE_AUG_PREVIEW = True
+    SAVE_AUG_PREVIEW_MAX_BATCHES = 2    # 每个 epoch 最多保存 1~3 个增强 batch
+    SAVE_AUG_PREVIEW_MAX_SAMPLES = 6    # 每个 batch 最多保存几对图（原图/增强图）

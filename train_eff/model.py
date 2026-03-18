@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from torchvision import models
 from config import Config
+import glob
 
 try:
     import timm
@@ -18,6 +19,15 @@ try:
     SAFETENSORS_AVAILABLE = True
 except ImportError:
     SAFETENSORS_AVAILABLE = False
+
+
+def _find_last_linear(module: nn.Module):
+    """在模块中查找最后一个 Linear 层。"""
+    last_linear = None
+    for layer in module.modules():
+        if isinstance(layer, nn.Linear):
+            last_linear = layer
+    return last_linear
 
 
 def _adapt_stem_conv_in_channels(backbone: nn.Module, in_channels: int = 3, model_type='efficientnetv2'):
@@ -317,6 +327,7 @@ class ModelClassifier(nn.Module):
     def __init__(self, num_classes=17, model_type='efficientnetv2_s', pretrained=True, dropout=0.2, in_channels=3):
         super(ModelClassifier, self).__init__()
         self.in_channels = in_channels
+        self.model_type = model_type
         
         if model_type.startswith('efficientnetv2'):
             sub_type = model_type.split('_')[-1]  # 's', 'm', 'l'
@@ -444,11 +455,85 @@ class ModelClassifier(nn.Module):
             return None
         
         weights_dir = Path(Config.PRETRAINED_WEIGHTS_DIR).absolute()
-        local_weight = weights_dir / f"{model_name}.safetensors"
         
+        # 尝试1: 直接查找与模型名称匹配的文件
+        local_weight = weights_dir / f"{model_name}.safetensors"
         if local_weight.exists():
             return str(local_weight)
+        
+        # 尝试2: 查找timm格式的权重文件结构
+        timm_pattern = str(weights_dir / f"hub/models--timm--{model_name}*/snapshots/*/model.safetensors")
+        timm_weights = glob.glob(timm_pattern)
+        
+        if timm_weights:
+            # 返回找到的第一个权重文件
+            return timm_weights[0]
+        
+        # 尝试3: 查找包含模型名称的所有safetensors文件
+        general_pattern = str(weights_dir / f"**/*{model_name}*.safetensors")
+        general_weights = glob.glob(general_pattern, recursive=True)
+        
+        if general_weights:
+            # 返回找到的第一个权重文件
+            return general_weights[0]
+        
+        print(f"警告: 本地权重不存在: {model_name}")
+        print(f"在路径 {weights_dir} 下搜索了以下模式:")
+        print(f"1. {local_weight}")
+        print(f"2. {timm_pattern}")
+        print(f"3. {general_pattern}")
         return None
+
+    def get_spatial_feature_map(self, x: torch.Tensor) -> torch.Tensor:
+        """返回用于 CAM 的空间特征图 [B, C, H, W]。"""
+        if self.model_type.startswith('efficientnetv2'):
+            return self.backbone.features(x)
+
+        if self.model_type.startswith('convnext'):
+            if hasattr(self.backbone, 'forward_features'):
+                feat = self.backbone.forward_features(x)
+            elif hasattr(self.backbone, 'features'):
+                feat = self.backbone.features(x)
+            else:
+                raise RuntimeError("Current backbone does not expose forward_features/features for OcCaMix")
+
+            if isinstance(feat, (tuple, list)):
+                feat = feat[0]
+
+            if feat.ndim == 4 and feat.shape[-1] == self.get_classifier_weight().shape[1]:
+                # 兼容 [B, H, W, C]
+                feat = feat.permute(0, 3, 1, 2).contiguous()
+
+            if feat.ndim != 4:
+                raise RuntimeError(f"OcCaMix expects 4D feature map [B,C,H,W], got {tuple(feat.shape)}")
+
+            return feat
+
+        raise RuntimeError(f"Unsupported model type for OcCaMix: {self.model_type}")
+
+    def get_classifier_weight(self) -> torch.Tensor:
+        """返回最终分类线性层权重 [num_classes, C]。"""
+        if self.model_type.startswith('efficientnetv2'):
+            head = self.backbone.classifier
+            linear = _find_last_linear(head)
+            if linear is None:
+                raise RuntimeError("No linear classifier found in EfficientNetV2 classifier")
+            return linear.weight
+
+        if self.model_type.startswith('convnext'):
+            if hasattr(self.backbone, 'head'):
+                linear = _find_last_linear(self.backbone.head)
+                if linear is not None:
+                    return linear.weight
+
+            if hasattr(self.backbone, 'classifier'):
+                linear = _find_last_linear(self.backbone.classifier)
+                if linear is not None:
+                    return linear.weight
+
+            raise RuntimeError("No linear classifier found in ConvNeXt head/classifier")
+
+        raise RuntimeError(f"Unsupported model type for classifier weight extraction: {self.model_type}")
     
     def forward(self, x):
         return self.backbone(x)
