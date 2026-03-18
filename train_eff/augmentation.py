@@ -105,6 +105,8 @@ def occamix_data(
     n_seg_max: int = 50,
     n_seg_min: int = 20,
     compactness: float = 10.0,
+    mask_only_ratio: float = 0.0,
+    mask_background: str = 'zero',
 ):
     """
     OcCaMix 数据增强（基于 attentive superpixel 的像素级混合）
@@ -117,12 +119,15 @@ def occamix_data(
         n_seg_max: SLIC 最大分段数
         n_seg_min: SLIC 最小分段数
         compactness: SLIC 紧致度
+        mask_only_ratio: 在 occamix 样本中使用“仅保留注意力超像素输入”的比例
+        mask_background: mask-only 背景填充策略，当前支持 'zero'
 
     Returns:
         mixed_images: [B, C, H, W]
         labels_a:     原始标签
         labels_b:     置乱标签
         lam_batch:    [B] 每个样本的混合面积比例
+        mask_only_flags: [B] 是否为 mask-only 样本
     """
     if not SKIMAGE_AVAILABLE:
         raise ImportError("OcCaMix requires scikit-image. Install with: pip install scikit-image")
@@ -138,22 +143,23 @@ def occamix_data(
     was_training = model.training
 
     model.eval()
-    with torch.no_grad():
-        feat_map = model_ref.get_spatial_feature_map(images[rand_idx])
-        cls_weight = model_ref.get_classifier_weight().detach()
+    try:
+        with torch.no_grad():
+            feat_map = model_ref.get_spatial_feature_map(images[rand_idx])
+            cls_weight = model_ref.get_classifier_weight().detach()
 
-        if feat_map.ndim != 4:
-            raise RuntimeError(f"OcCaMix expects 4D feature map [B,C,H,W], got {tuple(feat_map.shape)}")
+            if feat_map.ndim != 4:
+                raise RuntimeError(f"OcCaMix expects 4D feature map [B,C,H,W], got {tuple(feat_map.shape)}")
 
-        # CAM: [B, num_classes, Hf, Wf]
-        cam_all = torch.einsum('kc,bchw->bkhw', cls_weight.to(feat_map.device), feat_map)
-        cam_all = torch.relu(cam_all)
+            # CAM: [B, num_classes, Hf, Wf]
+            cam_all = torch.einsum('kc,bchw->bkhw', cls_weight.to(feat_map.device), feat_map)
+            cam_all = torch.relu(cam_all)
 
-        bsz_f, _, h_fmap, w_fmap = cam_all.shape
-        eval_train_map = cam_all.amax(dim=1).view(bsz_f, -1)  # [B, Hf*Wf]
-
-    if was_training:
-        model.train()
+            bsz_f, _, h_fmap, w_fmap = cam_all.shape
+            eval_train_map = cam_all.amax(dim=1).view(bsz_f, -1)  # [B, Hf*Wf]
+    finally:
+        if was_training:
+            model.train()
 
     n_top = max(1, int(n_top))
     n_top = min(n_top, eval_train_map.size(1))
@@ -162,7 +168,9 @@ def occamix_data(
     map_topn_row = (map_topn_idx // w_fmap).cpu().numpy()
     map_topn_col = (map_topn_idx % w_fmap).cpu().numpy()
 
+    mask_only_ratio = float(max(0.0, min(1.0, mask_only_ratio)))
     lam_batch = []
+    mask_only_flags = []
     for i in range(bsz):
         img_seg = images[rand_idx[i]].detach().permute(1, 2, 0).cpu().numpy()  # H,W,C
         n_seg = random.randint(int(n_seg_min), int(n_seg_max))
@@ -217,11 +225,24 @@ def occamix_data(
                 selected_mask |= best_superpixel_mask
 
         mix_pixel_count = int(selected_mask.sum())
+        use_mask_only = (np.random.rand() < mask_only_ratio)
+        mask_only_flags.append(use_mask_only)
+
         if mix_pixel_count > 0:
             selected_mask_t = torch.from_numpy(selected_mask).to(images.device)
-            mixed_images[i, :, selected_mask_t] = images[rand_idx[i], :, selected_mask_t]
-
-        lam_batch.append(mix_pixel_count / float(h_img * w_img))
+            if use_mask_only:
+                if mask_background != 'zero':
+                    raise ValueError(f"Unsupported mask_background: {mask_background}. Only 'zero' is supported now.")
+                masked_img = torch.zeros_like(mixed_images[i])
+                masked_img[:, selected_mask_t] = images[i, :, selected_mask_t]
+                mixed_images[i] = masked_img
+                lam_batch.append(1.0)
+            else:
+                mixed_images[i, :, selected_mask_t] = images[rand_idx[i], :, selected_mask_t]
+                lam_batch.append(mix_pixel_count / float(h_img * w_img))
+        else:
+            lam_batch.append(1.0 if use_mask_only else 0.0)
 
     lam_batch = torch.tensor(lam_batch, dtype=images.dtype, device=images.device)
-    return mixed_images, labels_a, labels_b, lam_batch
+    mask_only_flags = torch.tensor(mask_only_flags, dtype=torch.bool, device=images.device)
+    return mixed_images, labels_a, labels_b, lam_batch, mask_only_flags

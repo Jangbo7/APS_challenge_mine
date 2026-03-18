@@ -88,6 +88,9 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device, epoch, co
     occamix_seg_min = getattr(config, 'OCCAMIX_SEG_MIN', 20)
     occamix_seg_max = getattr(config, 'OCCAMIX_SEG_MAX', 50)
     occamix_compactness = getattr(config, 'OCCAMIX_COMPACTNESS', 10.0)
+    occamix_mask_only_ratio = getattr(config, 'OCCAMIX_MASK_ONLY_RATIO', 0.0)
+    occamix_mask_background = getattr(config, 'OCCAMIX_MASK_BACKGROUND', 'zero')
+    occamix_mask_single_label = getattr(config, 'OCCAMIX_MASK_ONLY_USE_SINGLE_LABEL', True)
     
     preview_enable = getattr(config, "SAVE_AUG_PREVIEW", True)
     preview_max_batches = getattr(config, "SAVE_AUG_PREVIEW_MAX_BATCHES", 2)
@@ -102,22 +105,7 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device, epoch, co
         images_orig = images.clone()  # 用于可视化对照
         labels_a, labels_b, lam = labels, labels, 1.0
         aug_applied = False
-
-        # ====== 你的增强分支（示例）======
-        # if aug_type == 'cutmix' and torch.rand(1).item() < aug_prob:
-        #     images, labels_a, labels_b, lam = cutmix_data(images, labels, alpha=aug_alpha)
-        #     aug_applied = True
-        #
-        # elif aug_type == 'occamix' and torch.rand(1).item() < aug_prob:
-        #     images, labels_a, labels_b, lam = occamix_data(
-        #         images, labels, model,
-        #         n_top=occamix_n,
-        #         n_seg_max=occamix_seg_max,
-        #         n_seg_min=occamix_seg_min,
-        #         compactness=occamix_compactness,
-        #     )
-        #     aug_applied = True
-        # ================================
+        mask_only_flags = None
 
         # 增强
         use_aug = (aug_type != 'none') and (np.random.rand() < aug_prob)
@@ -128,7 +116,7 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device, epoch, co
                 chosen = np.random.choice(['mixup', 'cutmix'])
             elif aug_type == 'both_all':
                 # 随机选一种（包含 occamix）
-                chosen = np.random.choice(['mixup', 'cutmix', 'occamix'])
+                chosen = np.random.choice(['mixup', 'cutmix', 'occamix_with_mask_only'])
             else:
                 chosen = aug_type
 
@@ -136,8 +124,8 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device, epoch, co
                 images, labels_a, labels_b, lam = mixup_data(images, labels, alpha=aug_alpha)
             elif chosen == 'cutmix':
                 images, labels_a, labels_b, lam = cutmix_data(images, labels, alpha=aug_alpha)
-            elif chosen == 'occamix':
-                images, labels_a, labels_b, lam = occamix_data(
+            elif chosen == 'occamix_with_mask_only':
+                images, labels_a, labels_b, lam, mask_only_flags = occamix_data(
                     images,
                     labels,
                     model,
@@ -145,6 +133,8 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device, epoch, co
                     n_seg_max=occamix_seg_max,
                     n_seg_min=occamix_seg_min,
                     compactness=occamix_compactness,
+                    mask_only_ratio=occamix_mask_only_ratio,
+                    mask_background=occamix_mask_background,
                 )
             else:
                 raise ValueError(f"Unknown augmentation type: {chosen}")
@@ -156,7 +146,7 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device, epoch, co
         outputs = model(images)
 
         # 计算损失
-        if chosen == 'occamix' and config.LOSS_TYPE == 'cross_entropy' and isinstance(lam, torch.Tensor):
+        if chosen == 'occamix_with_mask_only' and config.LOSS_TYPE == 'cross_entropy' and isinstance(lam, torch.Tensor):
             lam_batch = lam.to(device=outputs.device, dtype=outputs.dtype).view(-1)
             loss_a = F.cross_entropy(
                 outputs,
@@ -170,11 +160,37 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device, epoch, co
                 label_smoothing=config.LABEL_SMOOTHING,
                 reduction='none'
             )
-            loss = (lam_batch * loss_a + (1.0 - lam_batch) * loss_b).mean()
-        elif chosen == 'occamix' and isinstance(lam, torch.Tensor):
+            mixed_loss = lam_batch * loss_a + (1.0 - lam_batch) * loss_b
+
+            if (
+                occamix_mask_single_label
+                and isinstance(mask_only_flags, torch.Tensor)
+                and mask_only_flags.any()
+            ):
+                mask_only_flags = mask_only_flags.to(device=outputs.device)
+                single_loss = F.cross_entropy(
+                    outputs,
+                    labels,
+                    label_smoothing=config.LABEL_SMOOTHING,
+                    reduction='none'
+                )
+                mixed_loss = torch.where(mask_only_flags, single_loss, mixed_loss)
+
+            loss = mixed_loss.mean()
+        elif chosen == 'occamix_with_mask_only' and isinstance(lam, torch.Tensor):
             # focal 维持现有接口：退化为 batch 平均比例
-            lam_scalar = float(lam.mean().item())
-            loss = mixed_criterion(criterion, outputs, labels_a, labels_b, lam_scalar)
+            if (
+                occamix_mask_single_label
+                and isinstance(mask_only_flags, torch.Tensor)
+                and mask_only_flags.any()
+            ):
+                batch_loss = lam * criterion(outputs, labels_a) + (1.0 - lam) * criterion(outputs, labels_b)
+                single_loss = criterion(outputs, labels)
+                batch_loss = torch.where(mask_only_flags.to(device=outputs.device), single_loss, batch_loss)
+                loss = batch_loss.mean()
+            else:
+                lam_scalar = float(lam.mean().item())
+                loss = mixed_criterion(criterion, outputs, labels_a, labels_b, lam_scalar)
         else:
             loss = mixed_criterion(criterion, outputs, labels_a, labels_b, lam)
         
@@ -209,7 +225,11 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device, epoch, co
                 lam=lam,
                 epoch=epoch,
                 batch_idx=batch_idx,
-                aug_type=aug_type,
+                aug_type=(
+                    'occamix_maskmix'
+                    if chosen == 'occamix_with_mask_only' and isinstance(mask_only_flags, torch.Tensor) and mask_only_flags.any()
+                    else chosen
+                ),
                 save_root=config.CHECKPOINT_DIR,
                 max_samples=preview_max_samples,
             )
@@ -304,7 +324,7 @@ def main():
     # 数据增强配置
     print(f"Data augmentation type: {config.AUG_TYPE}")
     print(f"Augmentation probability: {config.AUG_PROB}")
-    if config.AUG_TYPE == 'occamix':
+    if config.AUG_TYPE == 'occamix_with_mask_only':
         print(f"OcCaMix N: {config.OCCAMIX_N}")
         print(f"OcCaMix seg min: {config.OCCAMIX_SEG_MIN}")
         print(f"OcCaMix seg max: {config.OCCAMIX_SEG_MAX}")

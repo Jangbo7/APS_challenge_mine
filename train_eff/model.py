@@ -5,7 +5,6 @@ import os
 from pathlib import Path
 from torchvision import models
 from config import Config
-import glob
 
 try:
     import timm
@@ -455,33 +454,10 @@ class ModelClassifier(nn.Module):
             return None
         
         weights_dir = Path(Config.PRETRAINED_WEIGHTS_DIR).absolute()
-        
-        # 尝试1: 直接查找与模型名称匹配的文件
         local_weight = weights_dir / f"{model_name}.safetensors"
+        
         if local_weight.exists():
             return str(local_weight)
-        
-        # 尝试2: 查找timm格式的权重文件结构
-        timm_pattern = str(weights_dir / f"hub/models--timm--{model_name}*/snapshots/*/model.safetensors")
-        timm_weights = glob.glob(timm_pattern)
-        
-        if timm_weights:
-            # 返回找到的第一个权重文件
-            return timm_weights[0]
-        
-        # 尝试3: 查找包含模型名称的所有safetensors文件
-        general_pattern = str(weights_dir / f"**/*{model_name}*.safetensors")
-        general_weights = glob.glob(general_pattern, recursive=True)
-        
-        if general_weights:
-            # 返回找到的第一个权重文件
-            return general_weights[0]
-        
-        print(f"警告: 本地权重不存在: {model_name}")
-        print(f"在路径 {weights_dir} 下搜索了以下模式:")
-        print(f"1. {local_weight}")
-        print(f"2. {timm_pattern}")
-        print(f"3. {general_pattern}")
         return None
 
     def get_spatial_feature_map(self, x: torch.Tensor) -> torch.Tensor:

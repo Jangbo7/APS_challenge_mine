@@ -81,15 +81,18 @@ class Config:
     USE_CLASS_ALPHA = True     # 是否按类别频率自动计算 alpha 权重
 
     # 数据增强配置（batch级别）
-    AUG_TYPE = 'occamix'   # 'none' | 'mixup' | 'cutmix' | 'occamix' | 'both'(mixup/cutmix随机) | 'both_all'(三者随机)
+    AUG_TYPE = 'occamix_with_mask_only'   # 'none' | 'mixup' | 'cutmix' | 'occamix_with_mask_only' | 'both'(mixup/cutmix随机) | 'both_all'(三者随机)
     AUG_ALPHA = 1.0       # Beta分布参数：mixup推荐0.4，cutmix推荐1.0
-    AUG_PROB = 0.6        # 每个batch执行增强的概率
+    AUG_PROB = 0.5        # 每个batch执行增强的概率
 
-    # OcCaMix 配置（仅当 AUG_TYPE='occamix' 或 'both_all' 时生效）
-    OCCAMIX_N = 3                 # 减少混合区域，避免覆盖
+    # OcCaMix 配置（仅当 AUG_TYPE='occamix_with_mask_only' 或 'both_all' 时生效）
+    OCCAMIX_N = 2                 # 减少混合区域，避免覆盖
     OCCAMIX_SEG_MIN = 40          # 更细粒度，贴合小种子
     OCCAMIX_SEG_MAX = 80          # 最大粒度，保证细节
-    OCCAMIX_COMPACTNESS = 5.0     # 更贴合轮廓，减少跨区域
+    OCCAMIX_COMPACTNESS = 4.0     # 更贴合轮廓，减少跨区域
+    OCCAMIX_MASK_ONLY_RATIO = 0.3  # 在occamix触发样本中，直接使用注意力超像素输入的比例
+    OCCAMIX_MASK_BACKGROUND = 'zero'  # mask-only背景填充策略: 'zero'
+    OCCAMIX_MASK_ONLY_USE_SINGLE_LABEL = True  # mask-only样本仅使用原标签单损失
 
     # 错误样本保存配置
     SAVE_ERROR_SAMPLES = True  # 是否保存验证错误的样本图片
