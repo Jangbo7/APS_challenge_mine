@@ -23,10 +23,17 @@ class Config:
     # PRETRAINED_WEIGHTS_DIR = "/data2/jiangwb/eff/pretrained_weights"  # 集群上用绝对路径
     
     # 训练参数
-    BATCH_SIZE = 64
-    NUM_EPOCHS = 25
+    BATCH_SIZE = 68
+    NUM_EPOCHS = 18
     LEARNING_RATE = 0.8e-4
     WEIGHT_DECAY = 0.8e-4
+    AMP_ENABLED = True  # 是否启用自动混合精度（仅CUDA有效）
+
+    # DataLoader 性能参数
+    NUM_WORKERS = 12
+    PIN_MEMORY = True
+    PERSISTENT_WORKERS = True
+    PREFETCH_FACTOR = 4
     
     # 图像参数
     IMAGE_SIZE = 224
@@ -40,7 +47,7 @@ class Config:
     DEVICE = "cuda"
     
     # 多GPU配置
-    USE_MULTI_GPU = True           # 是否使用多GPU训练
+    USE_MULTI_GPU = False           # 是否使用多GPU训练
     GPU_IDS = [0, 1]              # 使用的GPU索引（例：[0, 1] 表示使用第0和第1块GPU）
     
     # 随机种子
@@ -90,10 +97,11 @@ class Config:
     OCCAMIX_SEG_MIN = 40          # 更细粒度，贴合小种子
     OCCAMIX_SEG_MAX = 80          # 最大粒度，保证细节
     OCCAMIX_COMPACTNESS = 4.0     # 更贴合轮廓，减少跨区域
-    OCCAMIX_MASK_ONLY_RATIO = 0.3  # 在occamix触发样本中，直接使用注意力超像素输入的比例
+    OCCAMIX_LAM_BETA = 8      # lam校正系数：lam = beta * mixed_area_ratio（lam为混入图标签权重）
+    OCCAMIX_MASK_ONLY_RATIO = 0.5  # 在occamix触发样本中，直接使用注意力超像素输入的比例
     OCCAMIX_MASK_BACKGROUND = 'zero'  # mask-only背景填充策略: 'zero'
     OCCAMIX_MASK_ONLY_USE_SINGLE_LABEL = True  # mask-only样本仅使用原标签单损失
-    OCCAMIX_MASK_ONLY_TOPK_SUPERPIXELS_PER_BLOCK = 4  # mask-only中每个注意力块选取Top-K超像素，增大保留面积
+    OCCAMIX_MASK_ONLY_TOPK_SUPERPIXELS_PER_BLOCK = 16  # mask-only中每个注意力块选取Top-K超像素，增大保留面积
 
     # 错误样本保存配置
     SAVE_ERROR_SAMPLES = True  # 是否保存验证错误的样本图片
@@ -102,4 +110,8 @@ class Config:
     # ====== 增强可视化保存（用于核验 CutMix / OcCaMix 是否生效）======
     SAVE_AUG_PREVIEW = True
     SAVE_AUG_PREVIEW_MAX_BATCHES = 2    # 每个 epoch 最多保存 1~3 个增强 batch
-    SAVE_AUG_PREVIEW_MAX_SAMPLES = 6    # 每个 batch 最多保存几对图（原图/增强图）
+    SAVE_AUG_PREVIEW_MAX_SAMPLES = 5    # 每个 batch 最多保存几对图（原图/增强图）
+
+    
+
+    # lam计算有问题！！！！！！train.py 的 OcCaMix 损失权重方向到底需不需要反过来？？？？？？？

@@ -74,7 +74,7 @@ def save_aug_preview_batch(
         )
 
 
-def train_one_epoch(model, train_loader, criterion, optimizer, device, epoch, config):
+def train_one_epoch(model, train_loader, criterion, optimizer, device, epoch, config, scaler=None, use_amp=False):
     """训练一个 epoch"""
     model.train()
     losses = AverageMeter()
@@ -88,6 +88,7 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device, epoch, co
     occamix_seg_min = getattr(config, 'OCCAMIX_SEG_MIN', 20)
     occamix_seg_max = getattr(config, 'OCCAMIX_SEG_MAX', 50)
     occamix_compactness = getattr(config, 'OCCAMIX_COMPACTNESS', 10.0)
+    occamix_lam_beta = getattr(config, 'OCCAMIX_LAM_BETA', 0.7)
     occamix_mask_only_ratio = getattr(config, 'OCCAMIX_MASK_ONLY_RATIO', 0.0)
     occamix_mask_background = getattr(config, 'OCCAMIX_MASK_BACKGROUND', 'zero')
     occamix_mask_single_label = getattr(config, 'OCCAMIX_MASK_ONLY_USE_SINGLE_LABEL', True)
@@ -136,6 +137,7 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device, epoch, co
                     n_seg_max=occamix_seg_max,
                     n_seg_min=occamix_seg_min,
                     compactness=occamix_compactness,
+                    lam_beta=occamix_lam_beta,
                     mask_only_ratio=occamix_mask_only_ratio,
                     mask_background=occamix_mask_background,
                     mask_only_topk_superpixels_per_block=occamix_mask_only_topk_sp,
@@ -149,61 +151,67 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device, epoch, co
             aug_applied = True
 
         # 前向传播
-        optimizer.zero_grad()
-        outputs = model(images)
+        optimizer.zero_grad(set_to_none=True)
+        with torch.amp.autocast(device_type='cuda', enabled=use_amp):
+            outputs = model(images)
 
-        # 计算损失
-        if chosen == 'occamix_with_mask_only' and config.LOSS_TYPE == 'cross_entropy' and isinstance(lam, torch.Tensor):
-            lam_batch = lam.to(device=outputs.device, dtype=outputs.dtype).view(-1)
-            loss_a = F.cross_entropy(
-                outputs,
-                labels_a,
-                label_smoothing=config.LABEL_SMOOTHING,
-                reduction='none'
-            )
-            loss_b = F.cross_entropy(
-                outputs,
-                labels_b,
-                label_smoothing=config.LABEL_SMOOTHING,
-                reduction='none'
-            )
-            mixed_loss = lam_batch * loss_a + (1.0 - lam_batch) * loss_b
-
-            if (
-                occamix_mask_single_label
-                and isinstance(mask_only_flags, torch.Tensor)
-                and mask_only_flags.any()
-            ):
-                mask_only_flags = mask_only_flags.to(device=outputs.device)
-                single_loss = F.cross_entropy(
+            # 计算损失
+            if chosen == 'occamix_with_mask_only' and config.LOSS_TYPE == 'cross_entropy' and isinstance(lam, torch.Tensor):
+                lam_batch = lam.to(device=outputs.device, dtype=outputs.dtype).view(-1)
+                loss_a = F.cross_entropy(
                     outputs,
-                    labels,
+                    labels_a,
                     label_smoothing=config.LABEL_SMOOTHING,
                     reduction='none'
                 )
-                mixed_loss = torch.where(mask_only_flags, single_loss, mixed_loss)
+                loss_b = F.cross_entropy(
+                    outputs,
+                    labels_b,
+                    label_smoothing=config.LABEL_SMOOTHING,
+                    reduction='none'
+                )
+                mixed_loss = lam_batch * loss_a + (1.0 - lam_batch) * loss_b
 
-            loss = mixed_loss.mean()
-        elif chosen == 'occamix_with_mask_only' and isinstance(lam, torch.Tensor):
-            # focal 维持现有接口：退化为 batch 平均比例
-            if (
-                occamix_mask_single_label
-                and isinstance(mask_only_flags, torch.Tensor)
-                and mask_only_flags.any()
-            ):
-                batch_loss = lam * criterion(outputs, labels_a) + (1.0 - lam) * criterion(outputs, labels_b)
-                single_loss = criterion(outputs, labels)
-                batch_loss = torch.where(mask_only_flags.to(device=outputs.device), single_loss, batch_loss)
-                loss = batch_loss.mean()
+                if (
+                    occamix_mask_single_label
+                    and isinstance(mask_only_flags, torch.Tensor)
+                    and mask_only_flags.any()
+                ):
+                    mask_only_flags = mask_only_flags.to(device=outputs.device)
+                    single_loss = F.cross_entropy(
+                        outputs,
+                        labels,
+                        label_smoothing=config.LABEL_SMOOTHING,
+                        reduction='none'
+                    )
+                    mixed_loss = torch.where(mask_only_flags, single_loss, mixed_loss)
+
+                loss = mixed_loss.mean()
+            elif chosen == 'occamix_with_mask_only' and isinstance(lam, torch.Tensor):
+                # focal 维持现有接口：退化为 batch 平均比例
+                if (
+                    occamix_mask_single_label
+                    and isinstance(mask_only_flags, torch.Tensor)
+                    and mask_only_flags.any()
+                ):
+                    batch_loss = lam * criterion(outputs, labels_a) + (1.0 - lam) * criterion(outputs, labels_b)
+                    single_loss = criterion(outputs, labels)
+                    batch_loss = torch.where(mask_only_flags.to(device=outputs.device), single_loss, batch_loss)
+                    loss = batch_loss.mean()
+                else:
+                    lam_scalar = float(lam.mean().item())
+                    loss = mixed_criterion(criterion, outputs, labels_a, labels_b, lam_scalar)
             else:
-                lam_scalar = float(lam.mean().item())
-                loss = mixed_criterion(criterion, outputs, labels_a, labels_b, lam_scalar)
-        else:
-            loss = mixed_criterion(criterion, outputs, labels_a, labels_b, lam)
+                loss = mixed_criterion(criterion, outputs, labels_a, labels_b, lam)
         
         # 反向传播
-        loss.backward()
-        optimizer.step()
+        if use_amp:
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            optimizer.step()
         
         # 计算准确率
         acc1 = accuracy(outputs, labels, topk=(1,))[0]
@@ -247,7 +255,7 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device, epoch, co
 
 
 @torch.no_grad()
-def validate(model, val_loader, criterion, device):
+def validate(model, val_loader, criterion, device, use_amp=False):
     """验证模型"""
     model.eval()
     losses = AverageMeter()
@@ -259,12 +267,13 @@ def validate(model, val_loader, criterion, device):
     
     pbar = tqdm(val_loader, desc="[Validate]")
     for images, labels, img_paths in pbar:
-        images = images.to(device)
-        labels = labels.to(device)
+        images = images.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True)
         
         # 前向传播
-        outputs = model(images)
-        loss = criterion(outputs, labels)
+        with torch.amp.autocast(device_type='cuda', enabled=use_amp):
+            outputs = model(images)
+            loss = criterion(outputs, labels)
         
         # 计算准确率
         acc1 = accuracy(outputs, labels, topk=(1,))[0]
@@ -310,6 +319,9 @@ def main():
     # 设置设备
     device = torch.device(config.DEVICE if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
+    use_amp = bool(getattr(config, 'AMP_ENABLED', True) and device.type == 'cuda')
+    scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
+    print(f"AMP enabled: {use_amp}")
     
     # 创建日志文件
     log_file = os.path.join(config.CHECKPOINT_DIR, f"train_{get_current_time()}.log")
@@ -406,7 +418,8 @@ def main():
         
         # 训练
         train_loss, train_acc, mask_only_ratio_epoch = train_one_epoch(
-            model, train_loader, criterion, optimizer, device, epoch+1, config
+            model, train_loader, criterion, optimizer, device, epoch+1, config,
+            scaler=scaler, use_amp=use_amp
         )
         if config.AUG_TYPE == 'occamix_with_mask_only':
             print(f"Mask-only ratio this epoch: {mask_only_ratio_epoch:.3f}")
@@ -415,7 +428,9 @@ def main():
         val_loss, val_acc = None, None
         val_macro_f1 = None
         if val_loader:
-            val_loss, val_acc, all_preds, all_labels, error_samples = validate(model, val_loader, criterion, device)
+            val_loss, val_acc, all_preds, all_labels, error_samples = validate(
+                model, val_loader, criterion, device, use_amp=use_amp
+            )
             
             # 计算并打印类别级指标
             metrics_dict = compute_class_metrics(

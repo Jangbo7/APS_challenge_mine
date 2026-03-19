@@ -563,6 +563,17 @@ def get_dataloaders(config, split_start=None):
     train_dataset = APSSubsetDataset(full_train_dataset, train_indices, train_transform)
     val_dataset = APSSubsetDataset(full_train_dataset, val_indices, val_transform)
     
+    # DataLoader 参数
+    num_workers = getattr(config, "NUM_WORKERS", 4)
+    pin_memory = getattr(config, "PIN_MEMORY", True)
+    persistent_workers = getattr(config, "PERSISTENT_WORKERS", True)
+    prefetch_factor = getattr(config, "PREFETCH_FACTOR", 2)
+
+    worker_kwargs = {}
+    if num_workers > 0:
+        worker_kwargs["persistent_workers"] = persistent_workers
+        worker_kwargs["prefetch_factor"] = prefetch_factor
+
     # 创建训练数据加载器
     if config.IF_OVERSAMPLE:
         # 使用均衡BatchSampler
@@ -595,8 +606,9 @@ def get_dataloaders(config, split_start=None):
         train_loader = DataLoader(
             train_dataset,
             batch_sampler=balanced_sampler,  # 使用batch_sampler而不是batch_size
-            num_workers=4,
-            pin_memory=True
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            **worker_kwargs
         )
     else:
         # 使用标准DataLoader
@@ -604,16 +616,18 @@ def get_dataloaders(config, split_start=None):
             train_dataset,
             batch_size=config.BATCH_SIZE,
             shuffle=True,
-            num_workers=4,
-            pin_memory=True
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            **worker_kwargs
         )
     
     val_loader = DataLoader(
         val_dataset,
         batch_size=config.BATCH_SIZE,
         shuffle=False,
-        num_workers=4,
-        pin_memory=True
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        **worker_kwargs
     )
     
     return train_loader, val_loader, class_names
@@ -643,12 +657,23 @@ def get_test_dataloader(config):
     
     print(f"Test samples: {len(test_dataset)}")
     
+    num_workers = getattr(config, "NUM_WORKERS", 4)
+    pin_memory = getattr(config, "PIN_MEMORY", True)
+    persistent_workers = getattr(config, "PERSISTENT_WORKERS", True)
+    prefetch_factor = getattr(config, "PREFETCH_FACTOR", 2)
+
+    test_worker_kwargs = {}
+    if num_workers > 0:
+        test_worker_kwargs["persistent_workers"] = persistent_workers
+        test_worker_kwargs["prefetch_factor"] = prefetch_factor
+
     test_loader = DataLoader(
         test_dataset,
         batch_size=config.BATCH_SIZE,
         shuffle=False,
-        num_workers=4,
-        pin_memory=True
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        **test_worker_kwargs
     )
     
     return test_loader, class_names
