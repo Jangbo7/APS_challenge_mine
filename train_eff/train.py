@@ -187,20 +187,6 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device, epoch, co
                     mixed_loss = torch.where(mask_only_flags, single_loss, mixed_loss)
 
                 loss = mixed_loss.mean()
-            elif chosen == 'occamix_with_mask_only' and isinstance(lam, torch.Tensor):
-                # focal 维持现有接口：退化为 batch 平均比例
-                if (
-                    occamix_mask_single_label
-                    and isinstance(mask_only_flags, torch.Tensor)
-                    and mask_only_flags.any()
-                ):
-                    batch_loss = lam * criterion(outputs, labels_a) + (1.0 - lam) * criterion(outputs, labels_b)
-                    single_loss = criterion(outputs, labels)
-                    batch_loss = torch.where(mask_only_flags.to(device=outputs.device), single_loss, batch_loss)
-                    loss = batch_loss.mean()
-                else:
-                    lam_scalar = float(lam.mean().item())
-                    loss = mixed_criterion(criterion, outputs, labels_a, labels_b, lam_scalar)
             else:
                 loss = mixed_criterion(criterion, outputs, labels_a, labels_b, lam)
         

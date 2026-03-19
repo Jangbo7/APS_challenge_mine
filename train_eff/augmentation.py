@@ -121,7 +121,7 @@ def occamix_data(
         n_seg_max: SLIC 最大分段数
         n_seg_min: SLIC 最小分段数
         compactness: SLIC 紧致度
-        lam_beta: lam校正系数，lam = lam_beta * mixed_area_ratio
+        lam_beta: lam校正系数，lam = 1 - lam_beta * mixed_area_ratio
         mask_only_ratio: 在 occamix 样本中使用“仅保留注意力超像素输入”的比例
         mask_background: mask-only 背景填充策略，当前支持 'zero'
         mask_only_topk_superpixels_per_block: mask-only 样本中，每个注意力块选择的超像素数量
@@ -130,7 +130,7 @@ def occamix_data(
         mixed_images: [B, C, H, W]
         labels_a:     原始标签
         labels_b:     置乱标签
-        lam_batch:    [B] 每个样本“混入图标签权重”
+        lam_batch:    [B] 每个样本“原始图像保留的面积比例”
         mask_only_flags: [B] 是否为 mask-only 样本
     """
     if not SKIMAGE_AVAILABLE:
@@ -248,17 +248,11 @@ def occamix_data(
             else:
                 mixed_images[i, :, selected_mask_t] = images[rand_idx[i], :, selected_mask_t]
                 mixed_area_ratio = mix_pixel_count / float(h_img * w_img)
-                lam = lam_beta * mixed_area_ratio
+                lam = 1.0 - lam_beta * mixed_area_ratio   # 修正：lam=原图保留比例
                 lam = float(max(0.0, min(1.0, lam)))
                 lam_batch.append(lam)
         else:
-            if use_mask_only:
-                lam_batch.append(1.0)
-            else:
-                mixed_area_ratio = 0.0
-                lam = lam_beta * mixed_area_ratio
-                lam = float(max(0.0, min(1.0, lam)))
-                lam_batch.append(lam)
+            lam_batch.append(1.0)  # 修正：未混入时原图保留100%
 
     lam_batch = torch.tensor(lam_batch, dtype=images.dtype, device=images.device)
     mask_only_flags = torch.tensor(mask_only_flags, dtype=torch.bool, device=images.device)
