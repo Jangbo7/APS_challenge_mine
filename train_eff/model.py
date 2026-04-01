@@ -93,6 +93,87 @@ def _adapt_stem_conv_in_channels(backbone: nn.Module, in_channels: int = 3, mode
     return backbone
 
 
+def _infer_stage_out_channels(stage: nn.Module) -> int:
+    """Infer stage output channels for ConvNeXt-like stages."""
+    if hasattr(stage, 'blocks') and len(stage.blocks) > 0:
+        block0 = stage.blocks[0]
+        if hasattr(block0, 'conv_dw') and isinstance(block0.conv_dw, nn.Conv2d):
+            return int(block0.conv_dw.weight.shape[0])
+        if hasattr(block0, 'dwconv') and isinstance(block0.dwconv, nn.Conv2d):
+            return int(block0.dwconv.weight.shape[0])
+
+    if hasattr(stage, 'downsample'):
+        for layer in stage.downsample.modules():
+            if isinstance(layer, nn.Conv2d):
+                return int(layer.out_channels)
+
+    last_conv = None
+    for layer in stage.modules():
+        if isinstance(layer, nn.Conv2d):
+            last_conv = layer
+    if last_conv is not None:
+        return int(last_conv.out_channels)
+
+    raise RuntimeError("Unable to infer stage output channels for CBAM injection")
+
+
+class ChannelAttention(nn.Module):
+    def __init__(self, channels: int, reduction: int = 16):
+        super().__init__()
+        hidden = max(channels // reduction, 1)
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        self.mlp = nn.Sequential(
+            nn.Conv2d(channels, hidden, kernel_size=1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden, channels, kernel_size=1, bias=False),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        attn = torch.sigmoid(self.mlp(self.avg_pool(x)) + self.mlp(self.max_pool(x)))
+        return x * attn
+
+
+class SpatialAttention(nn.Module):
+    def __init__(self, kernel_size: int = 7):
+        super().__init__()
+        if kernel_size % 2 == 0:
+            raise ValueError("SpatialAttention kernel_size must be odd")
+        padding = kernel_size // 2
+        self.conv = nn.Conv2d(2, 1, kernel_size=kernel_size, padding=padding, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        avg_map = torch.mean(x, dim=1, keepdim=True)
+        max_map, _ = torch.max(x, dim=1, keepdim=True)
+        attn = torch.sigmoid(self.conv(torch.cat([avg_map, max_map], dim=1)))
+        return x * attn
+
+
+class CBAM(nn.Module):
+    def __init__(self, channels: int, reduction: int = 16, spatial_kernel: int = 7):
+        super().__init__()
+        self.channel_attn = ChannelAttention(channels, reduction=reduction)
+        self.spatial_attn = SpatialAttention(kernel_size=spatial_kernel)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.channel_attn(x)
+        x = self.spatial_attn(x)
+        return x
+
+
+class StageWithCBAM(nn.Module):
+    """Wrap a stage and apply CBAM on its output."""
+    def __init__(self, stage: nn.Module, channels: int, reduction: int = 16, spatial_kernel: int = 7):
+        super().__init__()
+        self.stage = stage
+        self.cbam = CBAM(channels=channels, reduction=reduction, spatial_kernel=spatial_kernel)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.stage(x)
+        x = self.cbam(x)
+        return x
+
+
 def get_efficientnetv2(num_classes=17, pretrained=True):
     """
     获取 EfficientNetV2 模型
@@ -324,10 +405,23 @@ class ModelClassifier(nn.Module):
     通用模型分类器包装类，支持 EfficientNetV2 和 ConvNeXt
     支持可变的输入通道数（3通道或5通道）
     """
-    def __init__(self, num_classes=17, model_type='efficientnetv2_s', pretrained=True, dropout=0.2, in_channels=3):
+    def __init__(
+        self,
+        num_classes=17,
+        model_type='efficientnetv2_s',
+        pretrained=True,
+        dropout=0.2,
+        in_channels=3,
+        use_cbam_stage3=False,
+        cbam_reduction=16,
+        cbam_spatial_kernel=7,
+    ):
         super(ModelClassifier, self).__init__()
         self.in_channels = in_channels
         self.model_type = model_type
+        self.use_cbam_stage3 = use_cbam_stage3
+        self.cbam_reduction = cbam_reduction
+        self.cbam_spatial_kernel = cbam_spatial_kernel
         
         if model_type.startswith('efficientnetv2'):
             sub_type = model_type.split('_')[-1]  # 's', 'm', 'l'
@@ -403,10 +497,32 @@ class ModelClassifier(nn.Module):
                         print(f"⚠ 权重加载失败: {e}")
                         print(f"  使用随机初始化的模型")
                 else:
-                    # 本地权重不存在，使用随机初始化
+                    # 本地权重不存在：若 pretrained=True，则尝试在线下载；失败后回退随机初始化
                     print(f"⚠ 本地权重不存在: {timm_model_name}")
-                    print(f"  使用随机初始化的模型")
-                    self.backbone = timm.create_model(timm_model_name, pretrained=False, num_classes=num_classes)
+                    if pretrained:
+                        print("  尝试在线下载预训练权重...")
+                        try:
+                            self.backbone = timm.create_model(
+                                timm_model_name,
+                                pretrained=True,
+                                num_classes=num_classes,
+                            )
+                            print("✓ 在线下载并加载预训练权重成功")
+                        except Exception as e:
+                            print(f"⚠ 在线下载失败: {e}")
+                            print("  回退为随机初始化模型")
+                            self.backbone = timm.create_model(
+                                timm_model_name,
+                                pretrained=False,
+                                num_classes=num_classes,
+                            )
+                    else:
+                        print("  使用随机初始化的模型")
+                        self.backbone = timm.create_model(
+                            timm_model_name,
+                            pretrained=False,
+                            num_classes=num_classes,
+                        )
                 
                 # 适配输入通道数
                 if in_channels != 3:
@@ -421,6 +537,9 @@ class ModelClassifier(nn.Module):
                             nn.Dropout(p=dropout, inplace=True),
                             nn.Linear(in_features, num_classes)
                         )
+
+                if self.use_cbam_stage3:
+                    self._inject_convnextv2_stage3_cbam()
             else:
                 # ConvNeXt V1 模型
                 sub_type = model_type.split('_')[-1]  # 'tiny', 'small', 'base', 'large'
@@ -448,6 +567,25 @@ class ModelClassifier(nn.Module):
             
         else:
             raise ValueError(f"Unknown model type: {model_type}")
+
+    def _inject_convnextv2_stage3_cbam(self):
+        """Inject CBAM only into ConvNeXtV2 stage3 (0-based index 2)."""
+        if not hasattr(self.backbone, 'stages'):
+            raise RuntimeError("Current ConvNeXtV2 backbone does not expose 'stages' for CBAM injection")
+
+        stages = self.backbone.stages
+        if len(stages) <= 2:
+            raise RuntimeError(f"ConvNeXtV2 expects at least 3 stages, got {len(stages)}")
+
+        stage3 = stages[2]
+        out_channels = _infer_stage_out_channels(stage3)
+        stages[2] = StageWithCBAM(
+            stage=stage3,
+            channels=out_channels,
+            reduction=self.cbam_reduction,
+            spatial_kernel=self.cbam_spatial_kernel,
+        )
+        print(f"✓ CBAM injected into ConvNeXtV2 stage3 with channels={out_channels}")
     
     def _get_local_weight(self, model_name, pretrained):
         """获取本地权重文件路径"""
@@ -552,7 +690,7 @@ class ModelClassifier(nn.Module):
         return x
 
 
-def build_model(config):
+def build_model(config, pretrained=True):
     """
     根据配置构建模型
     
@@ -573,8 +711,11 @@ def build_model(config):
     model = ModelClassifier(
         num_classes=config.NUM_CLASSES,
         model_type=config.MODEL_TYPE,
-        pretrained=True,
+        pretrained=pretrained,
         dropout=0.2,
-        in_channels=in_channels
+        in_channels=in_channels,
+        use_cbam_stage3=getattr(config, 'USE_CBAM_STAGE3', False),
+        cbam_reduction=getattr(config, 'CBAM_REDUCTION', 16),
+        cbam_spatial_kernel=getattr(config, 'CBAM_SPATIAL_KERNEL', 7),
     )
     return model

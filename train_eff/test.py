@@ -139,11 +139,12 @@ def main():
     print(f"Number of classes: {len(class_names)}")
     
     print("Building model...")
-    model = build_model(config)
+    # 测试阶段直接加载checkpoint，不需要触发预训练权重下载
+    model = build_model(config, pretrained=False)
     model = model.to(device)
     
     # checkpoint_path = os.path.join(config.CHECKPOINT_DIR, 'best.pth')
-    checkpoint_path = os.path.join(config.CHECKPOINT_DIR, 'best_acc.pth')
+    checkpoint_path = os.path.join(config.CHECKPOINT_DIR, 'best_loss-0873.pth')
     if not os.path.exists(checkpoint_path):
         checkpoint_path = os.path.join(config.CHECKPOINT_DIR, 'latest.pth')
     

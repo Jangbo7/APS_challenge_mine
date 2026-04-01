@@ -28,7 +28,7 @@ def _is_parallel_model(model):
     return isinstance(model, (nn.DataParallel, nn.parallel.DistributedDataParallel))
 
 
-def save_checkpoint(model, optimizer, epoch, best_acc, best_macro_f1=None, filepath=None, verbose=True):
+def save_checkpoint(model, optimizer, epoch, best_acc, best_macro_f1=None, best_val_loss=None, filepath=None, verbose=True):
     """保存模型检查点"""
     # 处理并行模型（DataParallel / DistributedDataParallel）
     model_state = model.state_dict()
@@ -45,6 +45,7 @@ def save_checkpoint(model, optimizer, epoch, best_acc, best_macro_f1=None, filep
         'optimizer_state_dict': optimizer.state_dict(),
         'best_acc': best_acc,
         'best_macro_f1': best_macro_f1 if best_macro_f1 is not None else 0.0,
+        'best_val_loss': best_val_loss if best_val_loss is not None else float('inf'),
     }
     torch.save(checkpoint, filepath)
     if verbose:
@@ -76,9 +77,14 @@ def load_checkpoint(model, optimizer, filepath, device='cuda', verbose=True):
     epoch = checkpoint.get('epoch', 0)
     best_acc = checkpoint.get('best_acc', 0.0)
     best_macro_f1 = checkpoint.get('best_macro_f1', 0.0)
+    best_val_loss = checkpoint.get('best_val_loss', float('inf'))
     if verbose:
-        print(f"Checkpoint loaded: {filepath}, Epoch: {epoch}, Best Acc: {best_acc:.4f}, Best Macro-F1: {best_macro_f1:.4f}")
-    return epoch, best_acc, best_macro_f1
+        print(
+            f"Checkpoint loaded: {filepath}, Epoch: {epoch}, "
+            f"Best Acc: {best_acc:.4f}, Best Macro-F1: {best_macro_f1:.4f}, "
+            f"Best Val Loss: {best_val_loss:.4f}"
+        )
+    return epoch, best_acc, best_macro_f1, best_val_loss
 
 
 class AverageMeter:

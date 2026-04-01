@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 import random
+from yolo_cutmix import YoloCutMixHelper
 
 try:
     from skimage import segmentation
@@ -85,6 +86,25 @@ def cutmix_data(images: torch.Tensor, labels: torch.Tensor, alpha: float = 1.0):
     labels_b = labels[rand_idx]
 
     return mixed_images, labels_a, labels_b, lam
+
+
+def cutmix_data_yolo(
+    images: torch.Tensor,
+    labels: torch.Tensor,
+    img_paths,
+    yolo_helper: YoloCutMixHelper,
+    alpha: float = 1.0,
+):
+    """
+    YOLO 引导 CutMix（薄包装）：核心逻辑在 yolo_cutmix.py 中。
+
+    Returns:
+        mixed_images, labels_a, labels_b, lam_batch, stats, applied_mask, rand_idx
+    """
+    if yolo_helper is None:
+        raise ValueError("cutmix_data_yolo requires a valid YoloCutMixHelper")
+
+    return yolo_helper.apply(images=images, labels=labels, img_paths=img_paths, alpha=alpha)
 
 
 def mixed_criterion(criterion, pred, labels_a, labels_b, lam):

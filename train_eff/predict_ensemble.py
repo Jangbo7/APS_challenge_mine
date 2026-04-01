@@ -16,7 +16,7 @@ from tqdm import tqdm
 import pandas as pd
 
 # 添加项目路径
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import Config
 from dataset import get_dataloaders, get_test_dataloader
@@ -227,17 +227,21 @@ def main():
     device = torch.device(config.DEVICE if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
+    # 确定要加载的检查点文件名
+    checkpoint_name = f"{config.ENSEMBLE_CHECKPOINT}.pth" if hasattr(config, 'ENSEMBLE_CHECKPOINT') else 'best_acc.pth'
+    
     # 查找所有训练好的模型
     model_dirs = []
     for item in os.listdir(config.CHECKPOINT_DIR):
         item_path = os.path.join(config.CHECKPOINT_DIR, item)
         if os.path.isdir(item_path) and item.startswith('model_'):
-            model_path = os.path.join(item_path, 'best.pth')
+            model_path = os.path.join(item_path, checkpoint_name)
             if os.path.exists(model_path):
                 model_dirs.append(model_path)
     
     if len(model_dirs) == 0:
-        print("No trained models found! Please run train_ensemble.py first.")
+        print(f"No trained models found! Please run train_ensemble.py first.")
+        print(f"(Looking for '{checkpoint_name}' in {config.CHECKPOINT_DIR})")
         return
     
     print(f"\nFound {len(model_dirs)} trained models:")
@@ -269,7 +273,7 @@ def main():
         preds, probs, img_paths = ensemble_predict_average(models, test_loader, device)
     
     # 保存预测结果（txt格式，与test.py一致）
-    output_file = os.path.join(config.CHECKPOINT_DIR, 'ensemble_result.txt')
+    output_file = os.path.join(config.CHECKPOINT_DIR, 'result.txt')
     save_predictions(img_paths, preds, class_names, output_file)
     
     # 显示前10个预测结果

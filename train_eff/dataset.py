@@ -114,7 +114,7 @@ class BalancedBatchSampler(BatchSampler):
                 for label in range(self.num_classes)
             )
             
-            if is_last_batch and remaining_samples < self.actual_batch_size:
+            if (not self.use_oversampling) and is_last_batch and remaining_samples < self.actual_batch_size:
                 # 最后一个batch样本不足，随机选择部分类别来填充
                 # 计算需要多少个类别
                 needed_classes = remaining_samples // self.n_per_class
@@ -343,18 +343,13 @@ def get_transforms(is_train=True, image_size=224, use_freq_channels=False, low_p
     if is_train:
         transforms_list = [
             transforms.Resize((image_size, image_size)),
-            transforms.RandomHorizontalFlip(p=0.5),
-            transforms.RandomRotation(degrees=15),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
             transforms.ToTensor(),
         ]
         
         if use_freq_channels:
             # 使用频率处理，跳过标准归一化
             transforms_list.append(AddFreqChannels(low_pass_size=low_pass_size))
-        else:
-            # 使用标准归一化
-            transforms_list.append(transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]))
+        # RGB 训练增强（旋转/翻转/颜色）与归一化在 train.py 中后置到 CutMix 之后
         
         return transforms.Compose(transforms_list)
     else:
@@ -529,7 +524,7 @@ def get_dataloaders(config, split_start=None):
     # 如果启用下采样，对训练集进行下采样
     if config.IF_UNDERAMPLE:
         print("\n" + "="*60)
-        print("Undersampling training set (max 100 samples per class)")
+        print(f"Undersampling training set (max {config.undersample_num} samples per class)")
         print("="*60)
         
         train_indices, class_stats = undersample_train_set(
@@ -562,6 +557,18 @@ def get_dataloaders(config, split_start=None):
     
     train_dataset = APSSubsetDataset(full_train_dataset, train_indices, train_transform)
     val_dataset = APSSubsetDataset(full_train_dataset, val_indices, val_transform)
+
+    num_workers = int(getattr(config, 'NUM_WORKERS', 4))
+    persistent_workers = bool(getattr(config, 'PERSISTENT_WORKERS', True))
+    prefetch_factor = int(getattr(config, 'PREFETCH_FACTOR', 2))
+
+    loader_kwargs = {
+        'num_workers': num_workers,
+        'pin_memory': True,
+    }
+    if num_workers > 0:
+        loader_kwargs['persistent_workers'] = persistent_workers
+        loader_kwargs['prefetch_factor'] = prefetch_factor
     
     # 创建训练数据加载器
     if config.IF_OVERSAMPLE:
@@ -595,8 +602,7 @@ def get_dataloaders(config, split_start=None):
         train_loader = DataLoader(
             train_dataset,
             batch_sampler=balanced_sampler,  # 使用batch_sampler而不是batch_size
-            num_workers=4,
-            pin_memory=True
+            **loader_kwargs,
         )
     else:
         # 使用标准DataLoader
@@ -604,16 +610,14 @@ def get_dataloaders(config, split_start=None):
             train_dataset,
             batch_size=config.BATCH_SIZE,
             shuffle=True,
-            num_workers=4,
-            pin_memory=True
+            **loader_kwargs,
         )
     
     val_loader = DataLoader(
         val_dataset,
         batch_size=config.BATCH_SIZE,
         shuffle=False,
-        num_workers=4,
-        pin_memory=True
+        **loader_kwargs,
     )
     
     return train_loader, val_loader, class_names
@@ -642,13 +646,24 @@ def get_test_dataloader(config):
     )
     
     print(f"Test samples: {len(test_dataset)}")
+
+    num_workers = int(getattr(config, 'NUM_WORKERS', 4))
+    persistent_workers = bool(getattr(config, 'PERSISTENT_WORKERS', True))
+    prefetch_factor = int(getattr(config, 'PREFETCH_FACTOR', 2))
+
+    loader_kwargs = {
+        'num_workers': num_workers,
+        'pin_memory': True,
+    }
+    if num_workers > 0:
+        loader_kwargs['persistent_workers'] = persistent_workers
+        loader_kwargs['prefetch_factor'] = prefetch_factor
     
     test_loader = DataLoader(
         test_dataset,
         batch_size=config.BATCH_SIZE,
         shuffle=False,
-        num_workers=4,
-        pin_memory=True
+        **loader_kwargs,
     )
     
     return test_loader, class_names

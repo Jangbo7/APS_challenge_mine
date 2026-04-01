@@ -258,6 +258,60 @@ python predict_ensemble.py
 MODEL_TYPE = 'convnextv2_base'  # 使用 ConvNeXtV2 Base 模型
 ```
 
+## YOLO-CutMix 样本级路由改造（本次更新）
+
+### 背景
+
+在小目标场景中，YOLO 检测框可能对部分样本不稳定。如果仍按整批统一增强，会出现：
+- 一个 batch 内很多样本并不适配 cutmix_yolo；
+- `invalid/skip` 偏高，增强有效率下降；
+- 训练日志看起来“开了增强，但有效样本比例低”。
+
+### 方案
+
+本次改为“样本级路由”而不是“整批硬切换”：
+- 适配样本：走 `cutmix_yolo`；
+- 不适配样本：按配置走 `mixup` 或 `none`；
+- 同一 batch 内允许不同样本走不同增强路径。
+
+### 关键配置（`config.py`）
+
+```python
+AUG_TYPE = 'cutmix_yolo'
+YOLO_CUTMIX_ENABLE = True
+
+# 样本级路由开关
+YOLO_CUTMIX_SAMPLE_ROUTING_ENABLE = True
+YOLO_CUTMIX_NON_ELIGIBLE_POLICY = 'mixup'   # 'mixup' | 'none'
+YOLO_CUTMIX_NON_ELIGIBLE_MIXUP_ALPHA = 0.4
+
+# YOLO 框面积过滤
+YOLO_CUTMIX_MIN_BOX_AREA_RATIO = 0.001
+YOLO_CUTMIX_MAX_BOX_AREA_RATIO = 0.8
+```
+
+### 日志指标释义
+
+训练阶段会打印：
+- `applied`: 真正执行 cutmix_yolo 的样本比例；
+- `skipped`: 被跳过样本比例；
+- `miss/empty/invalid`: 缓存未命中 / 无框 / 框不合法；
+- `too_small/too_large`: 框面积过小/过大导致不适配；
+- `route(mixup/none)`: 不适配样本被路由到 mixup 或 none 的比例。
+
+### 常见问题
+
+1. `invalid` 高：先检查缓存框坐标与训练图像尺寸是否一致。  
+2. `too_small` 高：适当下调 `YOLO_CUTMIX_MIN_BOX_AREA_RATIO`。  
+3. `too_large` 高：适当上调 `YOLO_CUTMIX_MAX_BOX_AREA_RATIO`。  
+4. `applied` 低：优先把 `YOLO_CUTMIX_NON_ELIGIBLE_POLICY` 设为 `mixup`，避免无效样本浪费。
+
+### 回退方式
+
+若需要恢复旧行为：
+- 关闭样本级路由：`YOLO_CUTMIX_SAMPLE_ROUTING_ENABLE = False`；
+- 或直接切回普通 CutMix：`AUG_TYPE = 'cutmix'`。
+
 ### 使用 ConvNeXtV2 模型
 
 #### 1. 安装依赖
