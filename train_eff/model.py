@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.hub
 import os
+import sys
+import builtins
 from pathlib import Path
 from torchvision import models
 from config import Config
@@ -19,6 +21,18 @@ try:
     SAFETENSORS_AVAILABLE = True
 except ImportError:
     SAFETENSORS_AVAILABLE = False
+
+
+def print(*args, **kwargs):
+    file = kwargs.get('file', sys.stdout)
+    encoding = getattr(file, 'encoding', None)
+    if encoding:
+        safe_args = []
+        for arg in args:
+            text = str(arg)
+            safe_args.append(text.encode(encoding, errors='replace').decode(encoding, errors='replace'))
+        return builtins.print(*safe_args, **kwargs)
+    return builtins.print(*args, **kwargs)
 
 
 def _find_last_linear(module: nn.Module):
@@ -50,10 +64,32 @@ def _adapt_stem_conv_in_channels(backbone: nn.Module, in_channels: int = 3, mode
     
     # 找到第一层卷积
     old_conv = None
+    stem_parent = None
+    stem_key = None
     if model_type.startswith('efficientnetv2'):
         old_conv = backbone.features[0][0]  # EfficientNetV2 结构
+        stem_parent = backbone.features[0]
+        stem_key = 0
     elif model_type.startswith('convnext'):
-        old_conv = backbone.features[0]  # ConvNeXt/ConvNeXtV2 结构
+        if hasattr(backbone, 'stem'):
+            if isinstance(backbone.stem, nn.Sequential) and len(backbone.stem) > 0 and isinstance(backbone.stem[0], nn.Conv2d):
+                old_conv = backbone.stem[0]
+                stem_parent = backbone.stem
+                stem_key = 0
+            elif isinstance(backbone.stem, nn.Conv2d):
+                old_conv = backbone.stem
+                stem_parent = backbone
+                stem_key = 'stem'
+        elif hasattr(backbone, 'features'):
+            first = backbone.features[0]
+            if isinstance(first, nn.Conv2d):
+                old_conv = first
+                stem_parent = backbone.features
+                stem_key = 0
+            elif isinstance(first, nn.Sequential) and len(first) > 0 and isinstance(first[0], nn.Conv2d):
+                old_conv = first[0]
+                stem_parent = first
+                stem_key = 0
     
     if old_conv is None or not isinstance(old_conv, nn.Conv2d):
         return backbone
@@ -85,10 +121,11 @@ def _adapt_stem_conv_in_channels(backbone: nn.Module, in_channels: int = 3, mode
             new_conv.bias.copy_(old_conv.bias)
     
     # 替换第一层卷积
-    if model_type.startswith('efficientnetv2'):
-        backbone.features[0][0] = new_conv
-    elif model_type.startswith('convnext'):
-        backbone.features[0] = new_conv
+    if stem_parent is not None:
+        if isinstance(stem_key, int):
+            stem_parent[stem_key] = new_conv
+        else:
+            setattr(stem_parent, stem_key, new_conv)
     
     return backbone
 
@@ -672,22 +709,178 @@ class ModelClassifier(nn.Module):
             raise RuntimeError("No linear classifier found in ConvNeXt head/classifier")
 
         raise RuntimeError(f"Unsupported model type for classifier weight extraction: {self.model_type}")
-    
+
+    def get_feature_dim(self) -> int:
+        weight = self.get_classifier_weight()
+        if weight.ndim != 2:
+            raise RuntimeError(f"Classifier weight should be 2D, got {tuple(weight.shape)}")
+        return int(weight.shape[1])
+
+    def extract_pooled_features(self, x: torch.Tensor) -> torch.Tensor:
+        """Return pooled pre-classifier features with shape [B, C]."""
+        if self.model_type.startswith('efficientnetv2'):
+            feat = self.backbone.features(x)
+            feat = self.backbone.avgpool(feat)
+            return torch.flatten(feat, 1)
+
+        if self.model_type.startswith('convnext'):
+            if hasattr(self.backbone, 'forward_features'):
+                feat = self.backbone.forward_features(x)
+            elif hasattr(self.backbone, 'features'):
+                feat = self.backbone.features(x)
+            else:
+                raise RuntimeError("Current ConvNeXt backbone does not expose forward_features/features")
+
+            if isinstance(feat, (tuple, list)):
+                feat = feat[0]
+            if feat.ndim == 2:
+                return feat
+            if feat.ndim != 4:
+                raise RuntimeError(f"Expected 2D or 4D features, got {tuple(feat.shape)}")
+
+            feature_dim = self.get_feature_dim()
+            if feat.shape[1] == feature_dim:
+                return feat.mean(dim=(-2, -1))
+            if feat.shape[-1] == feature_dim:
+                feat = feat.permute(0, 3, 1, 2).contiguous()
+                return feat.mean(dim=(-2, -1))
+            return feat.mean(dim=(-2, -1))
+
+        raise RuntimeError(f"Unsupported model type for feature extraction: {self.model_type}")
+
     def forward(self, x):
         return self.backbone(x)
     
     def get_features(self, x):
         """获取特征向量（用于特征提取或可视化）"""
-        if hasattr(self.backbone, 'features'):
-            # EfficientNetV2
-            x = self.backbone.features(x)
-            x = self.backbone.avgpool(x)
-            x = torch.flatten(x, 1)
-        elif hasattr(self.backbone, 'avgpool'):
-            # ConvNeXt / ConvNeXtV2
-            x = self.backbone.avgpool(self.backbone.features(x))
-            x = torch.flatten(x, 1)
-        return x
+        return self.extract_pooled_features(x)
+
+
+class DualViewConvNeXtClassifier(nn.Module):
+    """Dual-branch classifier for raw/detail views with fusion and auxiliary heads."""
+    def __init__(
+        self,
+        num_classes=17,
+        model_type='convnextv2_base',
+        pretrained=True,
+        dropout=0.2,
+        fusion_hidden_dim=1024,
+        fusion_dropout=0.2,
+        use_cbam_stage3=False,
+        cbam_reduction=16,
+        cbam_spatial_kernel=7,
+    ):
+        super().__init__()
+        self.raw_branch = ModelClassifier(
+            num_classes=num_classes,
+            model_type=model_type,
+            pretrained=pretrained,
+            dropout=dropout,
+            in_channels=3,
+            use_cbam_stage3=use_cbam_stage3,
+            cbam_reduction=cbam_reduction,
+            cbam_spatial_kernel=cbam_spatial_kernel,
+        )
+        self.detail_branch = ModelClassifier(
+            num_classes=num_classes,
+            model_type=model_type,
+            pretrained=pretrained,
+            dropout=dropout,
+            in_channels=3,
+            use_cbam_stage3=use_cbam_stage3,
+            cbam_reduction=cbam_reduction,
+            cbam_spatial_kernel=cbam_spatial_kernel,
+        )
+
+        feature_dim = self.raw_branch.get_feature_dim()
+        hidden_dim = max(1, int(fusion_hidden_dim))
+        self.raw_aux_head = nn.Linear(feature_dim, num_classes)
+        self.detail_aux_head = nn.Linear(feature_dim, num_classes)
+        self.fusion_head = nn.Sequential(
+            nn.Linear(feature_dim * 2, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(p=fusion_dropout),
+            nn.Linear(hidden_dim, num_classes),
+        )
+
+    def forward(self, raw_x: torch.Tensor, detail_x: torch.Tensor):
+        raw_feat = self.raw_branch.extract_pooled_features(raw_x)
+        detail_feat = self.detail_branch.extract_pooled_features(detail_x)
+        fusion_feat = torch.cat([raw_feat, detail_feat], dim=1)
+        return {
+            'fusion_logits': self.fusion_head(fusion_feat),
+            'raw_logits': self.raw_aux_head(raw_feat),
+            'detail_logits': self.detail_aux_head(detail_feat),
+        }
+
+
+class SingleBackbone6ChClassifier(nn.Module):
+    """Single-backbone classifier that consumes concatenated raw/detail 6-channel inputs."""
+    def __init__(
+        self,
+        num_classes=17,
+        model_type='convnextv2_base',
+        pretrained=True,
+        dropout=0.2,
+        use_cbam_stage3=False,
+        cbam_reduction=16,
+        cbam_spatial_kernel=7,
+    ):
+        super().__init__()
+        self.backbone = ModelClassifier(
+            num_classes=num_classes,
+            model_type=model_type,
+            pretrained=pretrained,
+            dropout=dropout,
+            in_channels=6,
+            use_cbam_stage3=use_cbam_stage3,
+            cbam_reduction=cbam_reduction,
+            cbam_spatial_kernel=cbam_spatial_kernel,
+        )
+
+    def forward(self, stacked_x: torch.Tensor):
+        return {
+            'fusion_logits': self.backbone(stacked_x),
+        }
+
+
+class SingleBackbone3ChClassifier(nn.Module):
+    """Single-backbone classifier for train2 single-view 3-channel experiments."""
+    def __init__(
+        self,
+        num_classes=17,
+        model_type='convnextv2_base',
+        pretrained=True,
+        dropout=0.2,
+        use_cbam_stage3=False,
+        cbam_reduction=16,
+        cbam_spatial_kernel=7,
+    ):
+        super().__init__()
+        self.backbone = ModelClassifier(
+            num_classes=num_classes,
+            model_type=model_type,
+            pretrained=pretrained,
+            dropout=dropout,
+            in_channels=3,
+            use_cbam_stage3=use_cbam_stage3,
+            cbam_reduction=cbam_reduction,
+            cbam_spatial_kernel=cbam_spatial_kernel,
+        )
+
+    def forward(self, x: torch.Tensor):
+        return {
+            'fusion_logits': self.backbone(x),
+        }
+
+    def get_spatial_feature_map(self, x: torch.Tensor) -> torch.Tensor:
+        return self.backbone.get_spatial_feature_map(x)
+
+    def get_classifier_weight(self) -> torch.Tensor:
+        return self.backbone.get_classifier_weight()
+
+    def extract_pooled_features(self, x: torch.Tensor) -> torch.Tensor:
+        return self.backbone.extract_pooled_features(x)
 
 
 def build_model(config, pretrained=True):
@@ -719,3 +912,57 @@ def build_model(config, pretrained=True):
         cbam_spatial_kernel=getattr(config, 'CBAM_SPATIAL_KERNEL', 7),
     )
     return model
+
+
+def build_dualview_model(config, pretrained=True):
+    if getattr(config, 'USE_FREQ_CHANNELS', False):
+        raise ValueError("Dual-view model does not support USE_FREQ_CHANNELS=True in this version.")
+
+    if config.PRETRAINED_WEIGHTS_DIR is not None:
+        os.makedirs(config.PRETRAINED_WEIGHTS_DIR, exist_ok=True)
+        torch.hub.set_dir(config.PRETRAINED_WEIGHTS_DIR)
+
+    model_variant = getattr(config, 'MODEL_VARIANT', 'dual_branch')
+    common_kwargs = {
+        'num_classes': config.NUM_CLASSES,
+        'model_type': config.MODEL_TYPE,
+        'pretrained': pretrained,
+        'dropout': getattr(config, 'DROPOUT', 0.2),
+        'use_cbam_stage3': getattr(config, 'USE_CBAM_STAGE3', False),
+        'cbam_reduction': getattr(config, 'CBAM_REDUCTION', 16),
+        'cbam_spatial_kernel': getattr(config, 'CBAM_SPATIAL_KERNEL', 7),
+    }
+
+    if model_variant == 'dual_branch':
+        model = DualViewConvNeXtClassifier(
+            fusion_hidden_dim=getattr(config, 'FUSION_HIDDEN_DIM', 1024),
+            fusion_dropout=getattr(config, 'FUSION_DROPOUT', 0.2),
+            **common_kwargs,
+        )
+    elif model_variant == 'single_backbone_6ch':
+        model = SingleBackbone6ChClassifier(**common_kwargs)
+    else:
+        raise ValueError(f"Unknown MODEL_VARIANT: {model_variant}")
+    return model
+
+
+def build_train2_model(config, pretrained=True):
+    train_mode = getattr(config, 'TRAIN_MODE', 'dual_view')
+    if train_mode == 'dual_view':
+        return build_dualview_model(config, pretrained=pretrained)
+    if train_mode == 'single_view':
+        if getattr(config, 'USE_FREQ_CHANNELS', False):
+            raise ValueError("train2 single-view mode does not support USE_FREQ_CHANNELS=True.")
+        if config.PRETRAINED_WEIGHTS_DIR is not None:
+            os.makedirs(config.PRETRAINED_WEIGHTS_DIR, exist_ok=True)
+            torch.hub.set_dir(config.PRETRAINED_WEIGHTS_DIR)
+        return SingleBackbone3ChClassifier(
+            num_classes=config.NUM_CLASSES,
+            model_type=config.MODEL_TYPE,
+            pretrained=pretrained,
+            dropout=getattr(config, 'DROPOUT', 0.2),
+            use_cbam_stage3=getattr(config, 'USE_CBAM_STAGE3', False),
+            cbam_reduction=getattr(config, 'CBAM_REDUCTION', 16),
+            cbam_spatial_kernel=getattr(config, 'CBAM_SPATIAL_KERNEL', 7),
+        )
+    raise ValueError(f"Unknown TRAIN_MODE: {train_mode}")

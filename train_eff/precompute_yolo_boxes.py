@@ -74,6 +74,39 @@ def save_preview_image(
     cv2.imwrite(output_path, image)
 
 
+def infer_boxes_for_image(model: YOLO, img_path: str, w: int, h: int, config, imgsz: int, conf: float) -> List[List[float]]:
+    results = model.predict(
+        source=img_path,
+        conf=conf,
+        max_det=config.MAX_DET,
+        imgsz=imgsz,
+        device=config.DEVICE,
+        verbose=False,
+    )
+
+    boxes_out: List[List[float]] = []
+    if results and len(results) > 0 and getattr(results[0], 'boxes', None) is not None:
+        boxes = results[0].boxes
+        xyxy = boxes.xyxy.cpu().numpy() if boxes.xyxy is not None else []
+        confs = boxes.conf.cpu().numpy() if boxes.conf is not None else []
+
+        for i in range(len(xyxy)):
+            x1, y1, x2, y2 = xyxy[i].tolist()
+            c = float(confs[i]) if len(confs) > i else 0.0
+
+            # clip to image bounds and keep valid boxes
+            x1 = max(0.0, min(float(w - 1), x1))
+            y1 = max(0.0, min(float(h - 1), y1))
+            x2 = max(float(x1 + 1.0), min(float(w), x2))
+            y2 = max(float(y1 + 1.0), min(float(h), y2))
+
+            if x2 <= x1 or y2 <= y1:
+                continue
+            boxes_out.append([x1, y1, x2, y2, c])
+
+    return boxes_out
+
+
 def main():
     config = YoloPrecomputeConfig()
 
@@ -88,6 +121,13 @@ def main():
         raise RuntimeError(f'No images found under: {train_dir}')
 
     model = YOLO(config.MODEL)
+    primary_imgsz = int(getattr(config, 'PRIMARY_IMGSZ', getattr(config, 'IMGSZ', 640)))
+    primary_conf = float(getattr(config, 'CONF', 0.005))
+    enable_second_pass = bool(getattr(config, 'ENABLE_SECOND_PASS', False))
+    second_pass_imgsz = int(getattr(config, 'SECOND_PASS_IMGSZ', 1024))
+    second_pass_conf = float(getattr(config, 'SECOND_PASS_CONF', primary_conf))
+    second_pass_triggered = 0
+    second_pass_recovered = 0
 
     items: Dict[str, List[List[float]]] = {}
     hit_images = 0
@@ -105,33 +145,12 @@ def main():
         with Image.open(img_path) as im:
             w, h = im.size
 
-        results = model.predict(
-            source=img_path,
-            conf=config.CONF,
-            max_det=config.MAX_DET,
-            device=config.DEVICE,
-            verbose=False,
-        )
-
-        boxes_out: List[List[float]] = []
-        if results and len(results) > 0 and getattr(results[0], 'boxes', None) is not None:
-            boxes = results[0].boxes
-            xyxy = boxes.xyxy.cpu().numpy() if boxes.xyxy is not None else []
-            confs = boxes.conf.cpu().numpy() if boxes.conf is not None else []
-
-            for i in range(len(xyxy)):
-                x1, y1, x2, y2 = xyxy[i].tolist()
-                c = float(confs[i]) if len(confs) > i else 0.0
-
-                # clip to image bounds and keep valid boxes
-                x1 = max(0.0, min(float(w - 1), x1))
-                y1 = max(0.0, min(float(h - 1), y1))
-                x2 = max(float(x1 + 1.0), min(float(w), x2))
-                y2 = max(float(y1 + 1.0), min(float(h), y2))
-
-                if x2 <= x1 or y2 <= y1:
-                    continue
-                boxes_out.append([x1, y1, x2, y2, c])
+        boxes_out = infer_boxes_for_image(model, img_path, w, h, config, primary_imgsz, primary_conf)
+        if enable_second_pass and (not boxes_out) and second_pass_imgsz != primary_imgsz:
+            second_pass_triggered += 1
+            boxes_out = infer_boxes_for_image(model, img_path, w, h, config, second_pass_imgsz, second_pass_conf)
+            if boxes_out:
+                second_pass_recovered += 1
 
         items[key] = {
             'boxes': boxes_out,
@@ -150,9 +169,15 @@ def main():
     cache = {
         'meta': {
             'model': config.MODEL,
-            'conf': config.CONF,
+            'primary_conf': primary_conf,
             'max_det': config.MAX_DET,
             'device': config.DEVICE,
+            'primary_imgsz': primary_imgsz,
+            'enable_second_pass': enable_second_pass,
+            'second_pass_imgsz': second_pass_imgsz if enable_second_pass else None,
+            'second_pass_conf': second_pass_conf if enable_second_pass else None,
+            'second_pass_triggered': second_pass_triggered,
+            'second_pass_recovered': second_pass_recovered,
             'key_mode': config.KEY_MODE,
             'train_dir': to_unix(train_dir),
             'num_images': len(images),
@@ -204,6 +229,9 @@ def main():
     print(f'Images without boxes: {empty_images}')
     print(f'Total boxes: {total_boxes}')
     print(f'Avg boxes/image: {avg_boxes:.3f}')
+    if enable_second_pass:
+        print(f'Second pass triggered: {second_pass_triggered}')
+        print(f'Second pass recovered: {second_pass_recovered}')
     if config.YOLO_PREVIEW_ENABLE:
         print(f'Preview images saved to: {preview_dir} (count: {saved_count})')
 

@@ -72,8 +72,11 @@ class YoloCutMixHelper:
         min_box_area_ratio: float = 0.001,
         max_box_area_ratio: float = 0.8,
         prob_in_box: float = 0.7,
+        sector_center_jitter_ratio: float = 0.05,
+        enable_recenter_shift: bool = True,
         center_tolerance_ratio: float = 0.10,
         debug_log: bool = True,
+        pair_use_area_match: bool = True,
         pair_random_prob: float = 0.2,
         pair_area_ratio_min: float = 0.2,
         pair_area_ratio_max: float = 5.0,
@@ -89,8 +92,11 @@ class YoloCutMixHelper:
         self.min_box_area_ratio = float(min_box_area_ratio)
         self.max_box_area_ratio = float(max_box_area_ratio)
         self.prob_in_box = float(prob_in_box)
+        self.sector_center_jitter_ratio = float(max(0.0, sector_center_jitter_ratio))
+        self.enable_recenter_shift = bool(enable_recenter_shift)
         self.center_tolerance_ratio = float(center_tolerance_ratio)
         self.debug_log = bool(debug_log)
+        self.pair_use_area_match = bool(pair_use_area_match)
         self.pair_random_prob = float(np.clip(pair_random_prob, 0.0, 1.0))
         self.pair_area_ratio_min = float(max(1e-6, pair_area_ratio_min))
         self.pair_area_ratio_max = float(max(self.pair_area_ratio_min, pair_area_ratio_max))
@@ -375,6 +381,8 @@ class YoloCutMixHelper:
         self,
         h: int,
         w: int,
+        center_x: float,
+        center_y: float,
         theta_start: float,
         theta_end: float,
         device: torch.device,
@@ -388,10 +396,7 @@ class YoloCutMixHelper:
         else:
             yy, xx = cached
 
-        cx = 0.5 * (w - 1)
-        cy = 0.5 * (h - 1)
-
-        ang = torch.atan2(yy - cy, xx - cx)
+        ang = torch.atan2(yy - center_y, xx - center_x)
         two_pi = 2.0 * np.pi
         ang = torch.remainder(ang + two_pi, two_pi)
         s = float((theta_start + two_pi) % two_pi)
@@ -402,6 +407,20 @@ class YoloCutMixHelper:
         else:
             mask = (ang >= s) | (ang <= e)
         return mask
+
+    def _sample_sector_center(self, h: int, w: int) -> Tuple[float, float]:
+        cx = 0.5 * (w - 1)
+        cy = 0.5 * (h - 1)
+        jitter = self.sector_center_jitter_ratio
+        if jitter <= 0:
+            return cx, cy
+
+        r_max = jitter * float(min(h, w))
+        radius = r_max * float(np.sqrt(np.random.uniform(0.0, 1.0)))
+        theta = float(np.random.uniform(0.0, 2.0 * np.pi))
+        dx = radius * float(np.cos(theta))
+        dy = radius * float(np.sin(theta))
+        return cx + dx, cy + dy
 
     def _build_valid_boxes(
         self,
@@ -477,6 +496,9 @@ class YoloCutMixHelper:
         bsz = len(area_ratios)
         rand_idx = torch.randperm(bsz, device=device)
         if bsz <= 1:
+            stats.pair_random = bsz
+            return rand_idx
+        if not self.pair_use_area_match:
             stats.pair_random = bsz
             return rand_idx
 
@@ -569,7 +591,10 @@ class YoloCutMixHelper:
 
             # 目标框用于中心偏移校正（若偏离中心超过阈值，先平移到中心）
             dst_box = random.choice(dst_boxes)
-            dst_dx, dst_dy = self._compute_recenter_shift(dst_box, h=h, w=w)
+            if self.enable_recenter_shift:
+                dst_dx, dst_dy = self._compute_recenter_shift(dst_box, h=h, w=w)
+            else:
+                dst_dx, dst_dy = 0, 0
             dst_img = mixed_images[i]
             if dst_dx != 0 or dst_dy != 0:
                 dst_img = self._translate_image(dst_img, dst_dx, dst_dy)
@@ -588,9 +613,18 @@ class YoloCutMixHelper:
                 if self.fallback_mode == 'random':
                     # 没有源框时退化：仍使用中心扇形同位替换（源不做中心校正）
                     src_img = images[src_i]
+                    center_x, center_y = self._sample_sector_center(h=h, w=w)
                     theta_start = float(np.random.uniform(-np.pi, np.pi))
                     theta_end = theta_start + span_angle
-                    mask = self._build_sector_mask(h=h, w=w, theta_start=theta_start, theta_end=theta_end, device=images.device)
+                    mask = self._build_sector_mask(
+                        h=h,
+                        w=w,
+                        center_x=center_x,
+                        center_y=center_y,
+                        theta_start=theta_start,
+                        theta_end=theta_end,
+                        device=images.device,
+                    )
                     mask3 = mask.unsqueeze(0).expand_as(dst_img)
                     dst_img = torch.where(mask3, src_img, dst_img)
                     mixed_images[i] = dst_img
@@ -620,7 +654,10 @@ class YoloCutMixHelper:
                 continue
 
             # 源框同样用于中心偏移校正
-            src_dx, src_dy = self._compute_recenter_shift(clipped, h=h, w=w)
+            if self.enable_recenter_shift:
+                src_dx, src_dy = self._compute_recenter_shift(clipped, h=h, w=w)
+            else:
+                src_dx, src_dy = 0, 0
             src_img = images[src_i]
             if src_dx != 0 or src_dy != 0:
                 src_img = self._translate_image(src_img, src_dx, src_dy)
@@ -629,9 +666,18 @@ class YoloCutMixHelper:
                     stats.skipped_invalid += 1
                     continue
 
+            center_x, center_y = self._sample_sector_center(h=h, w=w)
             theta_start = float(np.random.uniform(-np.pi, np.pi))
             theta_end = theta_start + span_angle
-            mask = self._build_sector_mask(h=h, w=w, theta_start=theta_start, theta_end=theta_end, device=images.device)
+            mask = self._build_sector_mask(
+                h=h,
+                w=w,
+                center_x=center_x,
+                center_y=center_y,
+                theta_start=theta_start,
+                theta_end=theta_end,
+                device=images.device,
+            )
             mask3 = mask.unsqueeze(0).expand_as(dst_img)
             dst_img = torch.where(mask3, src_img, dst_img)
 

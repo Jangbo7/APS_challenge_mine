@@ -17,7 +17,7 @@ from loss import FocalLoss
 from config import Config
 from dataset import get_dataloaders
 from model import build_model
-from augmentation import mixup_data, cutmix_data, cutmix_data_yolo, occamix_data, mixed_criterion
+from augmentation import mixup_data, cutmix_data, cutmix_data_yolo, occamix_data, occamix_bgfill_data, mixed_criterion
 from yolo_cutmix import YoloCutMixHelper
 from utils import (
     set_seed, save_checkpoint, load_checkpoint,
@@ -86,6 +86,7 @@ def apply_post_rgb_augment(images: torch.Tensor, config, yolo_area_ratios=None):
     contrast = float(getattr(config, 'POST_AUG_CONTRAST', 0.2))
     saturation = float(getattr(config, 'POST_AUG_SATURATION', 0.2))
     hue = float(getattr(config, 'POST_AUG_HUE', 0.1))
+    global_scale_jitter = float(getattr(config, 'POST_AUG_GLOBAL_SCALE_JITTER', 0.0))
     scale_area_adaptive = bool(getattr(config, 'POST_AUG_SCALE_AREA_ADAPTIVE', False))
     scale_area_prob = float(np.clip(getattr(config, 'POST_AUG_SCALE_AREA_PROB', 0.5), 0.0, 1.0))
     scale_area_small_thres = float(getattr(config, 'POST_AUG_SCALE_AREA_SMALL_THRES', 0.04))
@@ -93,11 +94,25 @@ def apply_post_rgb_augment(images: torch.Tensor, config, yolo_area_ratios=None):
     scale_jitter_small_box = float(getattr(config, 'POST_AUG_SCALE_JITTER_SMALL_BOX', 0.05))
     scale_jitter_mid_box = float(getattr(config, 'POST_AUG_SCALE_JITTER_MID_BOX', 0.05))
     scale_jitter_large_box = float(getattr(config, 'POST_AUG_SCALE_JITTER_LARGE_BOX', 0.03))
+    texture_enable = bool(getattr(config, 'POST_AUG_LOCAL_TEXTURE_ENABLE', False))
+    texture_prob = float(np.clip(getattr(config, 'POST_AUG_LOCAL_TEXTURE_PROB', 0.0), 0.0, 1.0))
+    texture_num_patches = max(1, int(getattr(config, 'POST_AUG_LOCAL_TEXTURE_NUM_PATCHES', 1)))
+    texture_patch_scale_min = float(getattr(config, 'POST_AUG_LOCAL_TEXTURE_PATCH_SCALE_MIN', 0.12))
+    texture_patch_scale_max = float(getattr(config, 'POST_AUG_LOCAL_TEXTURE_PATCH_SCALE_MAX', 0.28))
+    texture_blur_prob = float(np.clip(getattr(config, 'POST_AUG_LOCAL_TEXTURE_BLUR_PROB', 0.5), 0.0, 1.0))
+    texture_blur_sigma_min = float(getattr(config, 'POST_AUG_LOCAL_TEXTURE_BLUR_SIGMA_MIN', 0.5))
+    texture_blur_sigma_max = float(getattr(config, 'POST_AUG_LOCAL_TEXTURE_BLUR_SIGMA_MAX', 1.5))
+    texture_noise_prob = float(np.clip(getattr(config, 'POST_AUG_LOCAL_TEXTURE_NOISE_PROB', 0.5), 0.0, 1.0))
+    texture_noise_std = float(max(0.0, getattr(config, 'POST_AUG_LOCAL_TEXTURE_NOISE_STD', 0.04)))
     noise_std = float(getattr(config, 'POST_AUG_NOISE_STD', 0.015))
     sp_noise_p = float(getattr(config, 'POST_AUG_SP_NOISE_P', 0.003))
 
     if scale_area_large_thres < scale_area_small_thres:
         scale_area_large_thres = scale_area_small_thres
+    texture_patch_scale_min = max(0.01, texture_patch_scale_min)
+    texture_patch_scale_max = max(texture_patch_scale_min, texture_patch_scale_max)
+    texture_blur_sigma_min = max(0.01, texture_blur_sigma_min)
+    texture_blur_sigma_max = max(texture_blur_sigma_min, texture_blur_sigma_max)
 
     scale_stats = {
         'post_scale_small': 0,
@@ -105,12 +120,87 @@ def apply_post_rgb_augment(images: torch.Tensor, config, yolo_area_ratios=None):
         'post_scale_large': 0,
         'post_scale_fallback': 0,
         'post_scale_not_triggered': 0,
+        'post_texture_triggered': 0,
+        'post_texture_patch_blur': 0,
+        'post_texture_patch_noise': 0,
     }
+
+    def _apply_centered_scale(x: torch.Tensor, scale: float) -> torch.Tensor:
+        _, h, w = x.shape
+        nh = max(1, int(round(h * scale)))
+        nw = max(1, int(round(w * scale)))
+        x_scaled = TF.resize(x, [nh, nw], interpolation=InterpolationMode.BILINEAR)
+        if nh >= h and nw >= w:
+            top = (nh - h) // 2
+            left = (nw - w) // 2
+            return TF.crop(x_scaled, top, left, h, w)
+
+        pad_t = (h - nh) // 2
+        pad_b = h - nh - pad_t
+        pad_l = (w - nw) // 2
+        pad_r = w - nw - pad_l
+        return TF.pad(x_scaled, [pad_l, pad_t, pad_r, pad_b], fill=0.0)
+
+    def _sample_patch_length(base_size: int) -> int:
+        scale = random.uniform(texture_patch_scale_min, texture_patch_scale_max)
+        return max(1, min(base_size, int(round(base_size * scale))))
+
+    def _choose_patch_top_left(limit_h: int, limit_w: int, patch_h: int, patch_w: int):
+        top = 0 if limit_h <= patch_h else random.randint(0, limit_h - patch_h)
+        left = 0 if limit_w <= patch_w else random.randint(0, limit_w - patch_w)
+        return top, left
+
+    def _local_texture_augment(x: torch.Tensor):
+        _, h, w = x.shape
+        short_side = min(h, w)
+        blur_count = 0
+        noise_count = 0
+
+        for _ in range(texture_num_patches):
+            patch_h = _sample_patch_length(short_side)
+            patch_w = _sample_patch_length(short_side)
+            top, left = _choose_patch_top_left(h, w, patch_h, patch_w)
+            patch = x[:, top:top + patch_h, left:left + patch_w]
+
+            apply_blur = random.random() < texture_blur_prob
+            apply_noise = random.random() < texture_noise_prob
+            if not apply_blur and not apply_noise:
+                if texture_blur_prob >= texture_noise_prob:
+                    apply_blur = True
+                else:
+                    apply_noise = True
+
+            if apply_blur:
+                kernel_h = max(3, 2 * (patch_h // 6) + 1)
+                kernel_w = max(3, 2 * (patch_w // 6) + 1)
+                kernel_h = min(kernel_h, patch_h if patch_h % 2 == 1 else max(1, patch_h - 1))
+                kernel_w = min(kernel_w, patch_w if patch_w % 2 == 1 else max(1, patch_w - 1))
+                if kernel_h < 3:
+                    kernel_h = 1
+                if kernel_w < 3:
+                    kernel_w = 1
+                sigma = random.uniform(texture_blur_sigma_min, texture_blur_sigma_max)
+                patch = TF.gaussian_blur(patch, kernel_size=[kernel_h, kernel_w], sigma=[sigma, sigma])
+                blur_count += 1
+
+            if apply_noise and texture_noise_std > 0:
+                patch = patch + torch.randn_like(patch) * texture_noise_std
+                noise_count += 1
+
+            x[:, top:top + patch_h, left:left + patch_w] = torch.clamp(patch, 0.0, 1.0)
+
+        return x, blur_count, noise_count
 
     out = []
     for i in range(images.size(0)):
         x = images[i]
         _, h, w = x.shape
+
+        if global_scale_jitter > 0:
+            gj = max(0.0, global_scale_jitter)
+            scale = random.uniform(max(0.1, 1.0 - gj), 1.0 + gj)
+            if abs(scale - 1.0) > 1e-6:
+                x = _apply_centered_scale(x, scale)
 
         # 自适应缩放：由面积分段控制区间，并按概率触发
         if scale_area_adaptive and (random.random() < scale_area_prob):
@@ -148,21 +238,15 @@ def apply_post_rgb_augment(images: torch.Tensor, config, yolo_area_ratios=None):
                 scale_high = scale_low
             if scale_high > scale_low:
                 scale = random.uniform(scale_low, scale_high)
-                nh = max(1, int(round(h * scale)))
-                nw = max(1, int(round(w * scale)))
-                x_scaled = TF.resize(x, [nh, nw], interpolation=InterpolationMode.BILINEAR)
-                if nh >= h and nw >= w:
-                    top = (nh - h) // 2
-                    left = (nw - w) // 2
-                    x = TF.crop(x_scaled, top, left, h, w)
-                else:
-                    pad_t = (h - nh) // 2
-                    pad_b = h - nh - pad_t
-                    pad_l = (w - nw) // 2
-                    pad_r = w - nw - pad_l
-                    x = TF.pad(x_scaled, [pad_l, pad_t, pad_r, pad_b], fill=0.0)
+                x = _apply_centered_scale(x, scale)
         else:
             scale_stats['post_scale_not_triggered'] += 1
+
+        if texture_enable and (random.random() < texture_prob):
+            x, blur_count, noise_count = _local_texture_augment(x)
+            scale_stats['post_texture_triggered'] += 1
+            scale_stats['post_texture_patch_blur'] += int(blur_count)
+            scale_stats['post_texture_patch_noise'] += int(noise_count)
 
         if random.random() < hflip_p:
             x = TF.hflip(x)
@@ -203,7 +287,7 @@ def normalize_rgb_batch(images: torch.Tensor) -> torch.Tensor:
     return (images - mean) / std
 
 
-def train_one_epoch(model, train_loader, criterion, optimizer, device, epoch, config, yolo_cutmix_helper=None):
+def train_one_epoch(model, train_loader, criterion, optimizer, device, epoch, config, yolo_cutmix_helper=None, occamix_bgfill_helper=None):
     """训练一个 epoch"""
     model.train()
     losses = AverageMeter()
@@ -246,6 +330,9 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device, epoch, co
         'post_scale_large': 0,
         'post_scale_fallback': 0,
         'post_scale_not_triggered': 0,
+        'post_texture_triggered': 0,
+        'post_texture_patch_blur': 0,
+        'post_texture_patch_noise': 0,
     }
 
     sample_routing_enable = getattr(config, 'YOLO_CUTMIX_SAMPLE_ROUTING_ENABLE', False)
@@ -310,6 +397,31 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device, epoch, co
                     n_seg_min=occamix_seg_min,
                     compactness=occamix_compactness,
                 )
+            elif chosen == 'occamix_bgfill':
+                images, labels_a, labels_b, lam = occamix_bgfill_data(
+                    images,
+                    labels,
+                    img_paths,
+                    model,
+                    occamix_bgfill_helper,
+                    n_top=occamix_n,
+                    n_seg_max=occamix_seg_max,
+                    n_seg_min=occamix_seg_min,
+                    compactness=occamix_compactness,
+                    bg_aug_enable=bool(getattr(config, 'OCCAMIX_BG_AUG_ENABLE', True)),
+                    bg_bleed_into_box_ratio=float(getattr(config, 'OCCAMIX_BG_BLEED_INTO_BOX_RATIO', 0.07)),
+                    bg_black_dot_prob=float(getattr(config, 'OCCAMIX_BG_BLACK_DOT_PROB', 0.0005)),
+                    bg_black_dot_size_min=int(getattr(config, 'OCCAMIX_BG_BLACK_DOT_SIZE_MIN', 2)),
+                    bg_black_dot_size_max=int(getattr(config, 'OCCAMIX_BG_BLACK_DOT_SIZE_MAX', 4)),
+                    bg_blur_sigma_min=float(getattr(config, 'OCCAMIX_BG_BLUR_SIGMA_MIN', 1.2)),
+                    bg_blur_sigma_max=float(getattr(config, 'OCCAMIX_BG_BLUR_SIGMA_MAX', 2.8)),
+                    bg_brightness=float(getattr(config, 'OCCAMIX_BG_BRIGHTNESS', 0.45)),
+                    bg_contrast=float(getattr(config, 'OCCAMIX_BG_CONTRAST', 0.55)),
+                    bg_saturation=float(getattr(config, 'OCCAMIX_BG_SATURATION', 0.50)),
+                    bg_hue=float(getattr(config, 'OCCAMIX_BG_HUE', 0.3)),
+                    target_expand_ratio=float(getattr(config, 'OCCAMIX_BG_TARGET_EXPAND_RATIO', 0.0)),
+                    fill_blur_sigma=float(getattr(config, 'OCCAMIX_BG_FILL_BLUR_SIGMA', 0.0)),
+                )
             elif chosen == 'cutmix_yolo':
                 images, labels_a, labels_b, lam, batch_stats, applied_mask, rand_idx = cutmix_data_yolo(
                     images,
@@ -372,6 +484,9 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device, epoch, co
                 yolo_stats_epoch['post_scale_large'] += int(post_scale_stats.get('post_scale_large', 0))
                 yolo_stats_epoch['post_scale_fallback'] += int(post_scale_stats.get('post_scale_fallback', 0))
                 yolo_stats_epoch['post_scale_not_triggered'] += int(post_scale_stats.get('post_scale_not_triggered', 0))
+                yolo_stats_epoch['post_texture_triggered'] += int(post_scale_stats.get('post_texture_triggered', 0))
+                yolo_stats_epoch['post_texture_patch_blur'] += int(post_scale_stats.get('post_texture_patch_blur', 0))
+                yolo_stats_epoch['post_texture_patch_noise'] += int(post_scale_stats.get('post_texture_patch_noise', 0))
             images = normalize_rgb_batch(images)
 
         # 前向传播
@@ -560,11 +675,27 @@ def main():
     # 数据增强配置
     print(f"Data augmentation type: {config.AUG_TYPE}")
     print(f"Augmentation probability: {config.AUG_PROB}")
-    if config.AUG_TYPE == 'occamix':
+    if config.AUG_TYPE in ['occamix', 'occamix_bgfill']:
         print(f"OcCaMix N: {config.OCCAMIX_N}")
         print(f"OcCaMix seg min: {config.OCCAMIX_SEG_MIN}")
         print(f"OcCaMix seg max: {config.OCCAMIX_SEG_MAX}")
         print(f"OcCaMix compactness: {config.OCCAMIX_COMPACTNESS}")
+    if config.AUG_TYPE == 'occamix_bgfill':
+        print(f"OcCaMix BG cache: {config.OCCAMIX_BG_CACHE_PATH}")
+        print(f"OcCaMix BG aug enable: {config.OCCAMIX_BG_AUG_ENABLE}")
+        print(f"OcCaMix BG bleed ratio: {config.OCCAMIX_BG_BLEED_INTO_BOX_RATIO}")
+        print(f"OcCaMix BG target expand ratio: {config.OCCAMIX_BG_TARGET_EXPAND_RATIO}")
+        print(f"OcCaMix BG fill blur sigma: {config.OCCAMIX_BG_FILL_BLUR_SIGMA}")
+
+    if config.AUG_TYPE in ['cutmix_yolo', 'both_all'] and getattr(config, 'YOLO_CUTMIX_ENABLE', False):
+        pair_mode = 'area_match' if getattr(config, 'YOLO_CUTMIX_PAIR_USE_AREA_MATCH', True) else 'random_only'
+        print(f"YOLO-CutMix pairing: {pair_mode}")
+        recenter_mode = 'enabled' if getattr(config, 'YOLO_CUTMIX_ENABLE_RECENTER_SHIFT', True) else 'disabled'
+        print(f"YOLO-CutMix recenter shift: {recenter_mode}")
+        print(
+            "YOLO-CutMix sector center jitter ratio: "
+            f"{getattr(config, 'YOLO_CUTMIX_SECTOR_CENTER_JITTER_RATIO', 0.05):.3f}"
+        )
 
     yolo_cutmix_helper = None
     if config.AUG_TYPE in ['cutmix_yolo', 'both_all'] and getattr(config, 'YOLO_CUTMIX_ENABLE', False):
@@ -575,8 +706,11 @@ def main():
             fallback_mode=config.YOLO_CUTMIX_FALLBACK,
             min_box_area_ratio=config.YOLO_CUTMIX_MIN_BOX_AREA_RATIO,
             max_box_area_ratio=config.YOLO_CUTMIX_MAX_BOX_AREA_RATIO,
+            sector_center_jitter_ratio=getattr(config, 'YOLO_CUTMIX_SECTOR_CENTER_JITTER_RATIO', 0.05),
+            enable_recenter_shift=getattr(config, 'YOLO_CUTMIX_ENABLE_RECENTER_SHIFT', True),
             center_tolerance_ratio=getattr(config, 'YOLO_CUTMIX_CENTER_TOLERANCE_RATIO', 0.10),
             debug_log=config.YOLO_CUTMIX_DEBUG_LOG,
+            pair_use_area_match=getattr(config, 'YOLO_CUTMIX_PAIR_USE_AREA_MATCH', True),
             pair_random_prob=getattr(config, 'YOLO_CUTMIX_PAIR_RANDOM_PROB', 0.20),
             pair_area_ratio_min=getattr(config, 'YOLO_CUTMIX_PAIR_AREA_RATIO_MIN', 0.20),
             pair_area_ratio_max=getattr(config, 'YOLO_CUTMIX_PAIR_AREA_RATIO_MAX', 5.00),
@@ -584,6 +718,28 @@ def main():
             pair_area_ratio_max_target=getattr(config, 'YOLO_CUTMIX_PAIR_AREA_RATIO_MAX_TARGET', 3.00),
             pair_schedule_start_ratio=getattr(config, 'YOLO_CUTMIX_PAIR_SCHEDULE_START_RATIO', 0.30),
             pair_schedule_end_ratio=getattr(config, 'YOLO_CUTMIX_PAIR_SCHEDULE_END_RATIO', 0.85),
+        )
+    occamix_bgfill_helper = None
+    if config.AUG_TYPE == 'occamix_bgfill':
+        occamix_bgfill_helper = YoloCutMixHelper(
+            cache_path=getattr(config, 'OCCAMIX_BG_CACHE_PATH', config.YOLO_CUTMIX_CACHE_PATH),
+            train_dir=config.TRAIN_DIR,
+            key_mode=getattr(config, 'OCCAMIX_BG_KEY_MODE', config.YOLO_CUTMIX_KEY_MODE),
+            fallback_mode='skip',
+            min_box_area_ratio=getattr(config, 'OCCAMIX_BG_MIN_BOX_AREA_RATIO', 0.0),
+            max_box_area_ratio=getattr(config, 'OCCAMIX_BG_MAX_BOX_AREA_RATIO', 0.8),
+            sector_center_jitter_ratio=0.0,
+            enable_recenter_shift=getattr(config, 'OCCAMIX_BG_ENABLE_RECENTER_SHIFT', False),
+            center_tolerance_ratio=getattr(config, 'OCCAMIX_BG_CENTER_TOLERANCE_RATIO', 0.10),
+            debug_log=False,
+            pair_use_area_match=False,
+            pair_random_prob=1.0,
+            pair_area_ratio_min=0.0,
+            pair_area_ratio_max=1.0,
+            pair_area_ratio_min_target=0.0,
+            pair_area_ratio_max_target=1.0,
+            pair_schedule_start_ratio=0.0,
+            pair_schedule_end_ratio=0.0,
         )
 
     
@@ -662,6 +818,7 @@ def main():
         train_loss, train_acc, yolo_stats = train_one_epoch(
             model, train_loader, criterion, optimizer, device, epoch+1, config,
             yolo_cutmix_helper=yolo_cutmix_helper,
+            occamix_bgfill_helper=occamix_bgfill_helper,
         )
 
         if yolo_stats['total'] > 0:

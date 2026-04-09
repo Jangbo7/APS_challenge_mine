@@ -28,7 +28,17 @@ def _is_parallel_model(model):
     return isinstance(model, (nn.DataParallel, nn.parallel.DistributedDataParallel))
 
 
-def save_checkpoint(model, optimizer, epoch, best_acc, best_macro_f1=None, best_val_loss=None, filepath=None, verbose=True):
+def save_checkpoint(
+    model,
+    optimizer,
+    epoch,
+    best_acc,
+    best_macro_f1=None,
+    best_val_loss=None,
+    filepath=None,
+    verbose=True,
+    extra_state=None,
+):
     """保存模型检查点"""
     # 处理并行模型（DataParallel / DistributedDataParallel）
     model_state = model.state_dict()
@@ -47,6 +57,8 @@ def save_checkpoint(model, optimizer, epoch, best_acc, best_macro_f1=None, best_
         'best_macro_f1': best_macro_f1 if best_macro_f1 is not None else 0.0,
         'best_val_loss': best_val_loss if best_val_loss is not None else float('inf'),
     }
+    if extra_state:
+        checkpoint.update(extra_state)
     torch.save(checkpoint, filepath)
     if verbose:
         print(f"Checkpoint saved: {filepath}")

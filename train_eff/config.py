@@ -4,7 +4,7 @@ class Config:
     # 数据路径
     # DATA_ROOT = r"c:\Users\jangb\Desktop\contest_group\data\APS_dataset"
     # DATA_ROOT = "/data2/jiangwb/eff/data/APS_dataset"
-    DATA_ROOT = "data/APS_dataset"
+    DATA_ROOT = "data/APS_dataset_yolo224"
     # DATA_ROOT = "../data/APS_dataset"
     TRAIN_DIR = os.path.join(DATA_ROOT, "train")
     # TEST_DIR = os.path.join(DATA_ROOT, "val_noclass")  # 无标签测试集
@@ -14,7 +14,7 @@ class Config:
     # 模型保存路径
     # CHECKPOINT_DIR = r"c:\Users\jangb\Desktop\contest_group\train_eff\checkpoints2"
     # CHECKPOINT_DIR = "/data2/jiangwb/eff/checkpoints"
-    # CHECKPOINT_DIR = "eff/checkpoints_yc4"
+    # CHECKPOINT_DIR = "eff/checkpoints_ocaf224"
     CHECKPOINT_DIR ='eff'
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     
@@ -49,7 +49,7 @@ class Config:
     GPU_IDS = [0, 1]              # 使用的GPU索引（例：[0, 1] 表示使用第0和第1块GPU）
     
     # 随机种子
-    SEED = 7
+    SEED = 17
     
     # 验证集比例（从训练集分割）
     VAL_SPLIT = 0.2
@@ -91,40 +91,57 @@ class Config:
     USE_CLASS_ALPHA = True     # 是否按类别频率自动计算 alpha 权重
 
     # 数据增强配置（batch级别）
-    AUG_TYPE = 'cutmix_yolo'   # 'none' | 'mixup' | 'cutmix' | 'cutmix_yolo' | 'occamix' | 'both'(mixup/cutmix随机) | 'both_all'(四者随机)
-    AUG_ALPHA = 2      # Beta分布参数：mixup推荐0.4，cutmix推荐1.0
-    AUG_PROB = 0.5        # 每个batch执行增强的概率
+    AUG_TYPE = 'occamix'   # 'none' | 'mixup' | 'cutmix' | 'cutmix_yolo' | 'occamix' | 'both'(mixup/cutmix随机) | 'both_all'(四者随机)
+    AUG_ALPHA = 1      # Beta分布参数：mixup推荐0.4，cutmix推荐1.0
+    AUG_PROB = 0.35   # 每个batch执行增强的概率
 
     # 后置增强：在 mixup/cutmix/cutmix_yolo 之后再执行（仅 RGB 训练）
     POST_AUG_ENABLE = True
+    POST_AUG_GLOBAL_SCALE_JITTER = 0.05
     POST_AUG_HFLIP_P = 0.5
-    POST_AUG_ROTATE_DEGREES = 15
+    POST_AUG_ROTATE_DEGREES = 10
     POST_AUG_BRIGHTNESS = 0.1
     POST_AUG_CONTRAST = 0.1
     POST_AUG_SATURATION = 0.1
     POST_AUG_HUE = 0.1
-    POST_AUG_SCALE_AREA_ADAPTIVE = True  # 是否按YOLO框面积自适应缩放区间（控制所有缩放）
+    POST_AUG_SCALE_AREA_ADAPTIVE = False # 是否按YOLO框面积自适应缩放区间（控制所有缩放）
     POST_AUG_SCALE_AREA_PROB = 0.5  # 自适应缩放触发概率
     POST_AUG_SCALE_AREA_SMALL_THRES = 0.1  # 小目标阈值（面积比）
     POST_AUG_SCALE_AREA_LARGE_THRES = 0.4  # 大目标阈值（面积比）
-    POST_AUG_SCALE_JITTER_SMALL_BOX = 0.25  # 小目标仅放大: scale in [1.0, 1.0+jitter]
-    POST_AUG_SCALE_JITTER_MID_BOX = 0.25  # 中等目标双向抖动: scale in [1.0-jitter, 1.0+jitter]
-    POST_AUG_SCALE_JITTER_LARGE_BOX = 0.45  # 大目标仅缩小: scale in [1.0-jitter, 1.0]
+    POST_AUG_SCALE_JITTER_SMALL_BOX = 0.3  # 小目标仅放大: scale in [1.0, 1.0+jitter]
+    POST_AUG_SCALE_JITTER_MID_BOX = 0.3  # 中等目标双向抖动: scale in [1.0-jitter, 1.0+jitter]
+    POST_AUG_SCALE_JITTER_LARGE_BOX = 0.4  # 大目标仅缩小: scale in [1.0-jitter, 1.0]
     POST_AUG_NOISE_STD = 0       # 轻度高斯噪声标准差（像素域 0~1）
     POST_AUG_SP_NOISE_P = 0       # 轻量椒盐噪声像素概率（salt/pepper 各占一半）
 
     # YOLO 引导 CutMix（离线缓存）
+    # Local texture post-augmentation
+    POST_AUG_LOCAL_TEXTURE_ENABLE = True
+    POST_AUG_LOCAL_TEXTURE_PROB = 0.5
+    POST_AUG_LOCAL_TEXTURE_NUM_PATCHES = 3
+    POST_AUG_LOCAL_TEXTURE_PATCH_SCALE_MIN = 0.2
+    POST_AUG_LOCAL_TEXTURE_PATCH_SCALE_MAX = 0.28
+    POST_AUG_LOCAL_TEXTURE_BLUR_PROB = 0.5
+    POST_AUG_LOCAL_TEXTURE_BLUR_SIGMA_MIN = 0.5
+    POST_AUG_LOCAL_TEXTURE_BLUR_SIGMA_MAX = 1.5
+    POST_AUG_LOCAL_TEXTURE_NOISE_PROB = 0.6
+    POST_AUG_LOCAL_TEXTURE_NOISE_STD = 0.06
+
+    # YOLO-guided CutMix
     YOLO_CUTMIX_ENABLE = True
     YOLO_CUTMIX_CACHE_PATH = "eff/yolo_boxes_cache.json"
     YOLO_CUTMIX_KEY_MODE = 'relative_to_train_dir'  # 'relative_to_train_dir' | 'absolute'
     YOLO_CUTMIX_FALLBACK = 'skip'                   # 'skip' | 'random'
     YOLO_CUTMIX_MIN_BOX_AREA_RATIO = 0
     YOLO_CUTMIX_MAX_BOX_AREA_RATIO = 0.8
+    YOLO_CUTMIX_SECTOR_CENTER_JITTER_RATIO = 0.05
+    YOLO_CUTMIX_ENABLE_RECENTER_SHIFT = False
     YOLO_CUTMIX_CENTER_TOLERANCE_RATIO = 0.10
     YOLO_CUTMIX_DEBUG_LOG = False
 
     # YOLO-CutMix 配对策略：20% 随机 + 80% 面积阈值匹配（失败回退随机）
-    YOLO_CUTMIX_PAIR_RANDOM_PROB = 0.2
+    YOLO_CUTMIX_PAIR_USE_AREA_MATCH = True
+    YOLO_CUTMIX_PAIR_RANDOM_PROB = 1
     YOLO_CUTMIX_PAIR_AREA_RATIO_MIN = 0.33
     YOLO_CUTMIX_PAIR_AREA_RATIO_MAX = 3
     # 动态收紧目标窗口（训练后期收紧以提升稳定性）
@@ -134,7 +151,7 @@ class Config:
     YOLO_CUTMIX_PAIR_SCHEDULE_END_RATIO = 0.7
 
     # 样本级路由：对不适配 YOLO-CutMix 的样本单独处理
-    YOLO_CUTMIX_SAMPLE_ROUTING_ENABLE = False
+    YOLO_CUTMIX_SAMPLE_ROUTING_ENABLE = True
     YOLO_CUTMIX_NON_ELIGIBLE_POLICY = 'none'       # 'mixup' | 'none'
     YOLO_CUTMIX_NON_ELIGIBLE_MIXUP_ALPHA = 0.4
     YOLO_CUTMIX_MIN_ELIGIBLE_RATIO = 0.0            # 预留：低于阈值可触发整批降级
@@ -150,6 +167,26 @@ class Config:
     ERROR_SAMPLES_DIR = "eff/checkpoints_base1/error_samples"  # 错误样本保存母文件夹
 
     # ====== 增强可视化保存（用于核验 CutMix / OcCaMix 是否生效）======
-    SAVE_AUG_PREVIEW = False
+    OCCAMIX_BG_CACHE_PATH = "eff/yolo_boxes_cache.json"
+    OCCAMIX_BG_KEY_MODE = 'relative_to_train_dir'
+    OCCAMIX_BG_MIN_BOX_AREA_RATIO = 0.0
+    OCCAMIX_BG_MAX_BOX_AREA_RATIO = 0.8
+    OCCAMIX_BG_ENABLE_RECENTER_SHIFT = False
+    OCCAMIX_BG_CENTER_TOLERANCE_RATIO = 0.10
+    OCCAMIX_BG_AUG_ENABLE = True
+    OCCAMIX_BG_BLEED_INTO_BOX_RATIO = 0.07
+    OCCAMIX_BG_BLACK_DOT_PROB = 0.0005
+    OCCAMIX_BG_BLACK_DOT_SIZE_MIN = 2
+    OCCAMIX_BG_BLACK_DOT_SIZE_MAX = 4
+    OCCAMIX_BG_BLUR_SIGMA_MIN = 1.2
+    OCCAMIX_BG_BLUR_SIGMA_MAX = 2.8
+    OCCAMIX_BG_BRIGHTNESS = 0.45
+    OCCAMIX_BG_CONTRAST = 0.55
+    OCCAMIX_BG_SATURATION = 0.50
+    OCCAMIX_BG_HUE = 0.3
+    OCCAMIX_BG_TARGET_EXPAND_RATIO = 0.0
+    OCCAMIX_BG_FILL_BLUR_SIGMA = 0.0
+
+    SAVE_AUG_PREVIEW = True
     SAVE_AUG_PREVIEW_MAX_BATCHES = 2    # 每个 epoch 最多保存 1~3 个增强 batch
-    SAVE_AUG_PREVIEW_MAX_SAMPLES = 6    # 每个 batch 最多保存几对图（原图/增强图）
+    SAVE_AUG_PREVIEW_MAX_SAMPLES = 4    # 每个 batch 最多保存几对图（原图/增强图）
