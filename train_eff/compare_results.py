@@ -14,14 +14,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Compare two result txt files and export original images for samples with different predictions."
     )
-    parser.add_argument("--result-a", required=True, help="Path to the first result txt file.")
-    parser.add_argument("--result-b", required=True, help="Path to the second result txt file.")
+    parser.add_argument("--result-a", default='eff/eff2/result.txt', help="Path to the first result txt file.")
+    parser.add_argument("--result-b", default='eff/result.txt', help="Path to the second result txt file.")
     parser.add_argument(
         "--image-dir",
         default=str(DEFAULT_IMAGE_DIR),
         help="Directory containing original test images.",
     )
-    parser.add_argument("--output-dir", required=True, help="Directory to store comparison outputs.")
+    parser.add_argument("--output-dir", default='eff/compare_f', help="Directory to store comparison outputs.")
     return parser.parse_args()
 
 

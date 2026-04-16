@@ -9,7 +9,7 @@ class DualViewTestConfig:
     DETAIL_TEST_DIR = os.path.join("data", "APS_dataset_yolo224", "test_noclass")
     CLASSNAME_FILE = os.path.join("data", "APS_dataset", "classname.txt")
 
-    CHECKPOINT_PATH = os.path.join("eff/eff2/p_d", "latest.pth")
+    CHECKPOINT_PATH = os.path.join("eff/eff2/detail", "latest.pth")
     OUTPUT_FILE = os.path.join("eff/eff2/detail", "result.txt")
     OUTPUT_CSV = os.path.join("eff/eff2/detail", "result.csv")
 
@@ -62,7 +62,7 @@ class RoutedTrain2TestConfig:
     LARGE_AREA_THRES = 0.25
 
     SMALL_POLICY = "crop224_only"
-    MID_POLICY = "average"
+    MID_POLICY = "average" 
     LARGE_POLICY = "raw_only"
     NO_BOX_POLICY = "raw_only"
 

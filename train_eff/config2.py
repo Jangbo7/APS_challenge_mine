@@ -15,13 +15,13 @@ class Config2:
     # raw / detail
     SINGLE_VIEW_SOURCE = "detail"
 
-    CHECKPOINT_DIR = "eff2/single_detail-f-p"
+    CHECKPOINT_DIR = "eff2/single_detail-f"
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
     PRETRAINED_WEIGHTS_DIR = "eff/pretrained_weights"
 
     BATCH_SIZE = 32
-    NUM_EPOCHS = 30
+    NUM_EPOCHS = 28
     LEARNING_RATE = 0.82e-4
     WEIGHT_DECAY = 0.05
     NUM_WORKERS = 8
@@ -32,11 +32,11 @@ class Config2:
     IMAGE_SIZE = 224
     NUM_CLASSES = 17
     DEVICE = "cuda"
-    SEED = 77
+    SEED = 17
     VAL_SPLIT = 0
     SAVE_LAST_K_EPOCHS = 4
     RESUME = False
-    SELF_TRAIN_ENABLE = True
+    SELF_TRAIN_ENABLE = False
     SELF_TRAIN_EPOCHS = 8
     SELF_TRAIN_LEARNING_RATE = 0.25e-4
     SELF_TRAIN_INIT_CHECKPOINT = os.path.join("eff2", "single_detail-f", "latest.pth")
@@ -83,8 +83,8 @@ class Config2:
     DEFECT_ENABLE = False
     DEFECT_PROB = 0.35
     DEFECT_N_TOP = 1
-    DEFECT_SEG_MIN = 120
-    DEFECT_SEG_MAX = 140
+    DEFECT_SEG_MIN = 100
+    DEFECT_SEG_MAX = 120
     DEFECT_COMPACTNESS = 1
     DEFECT_CAM_CHECKPOINT_PATH = "eff2/single_1/best_loss.pth"
     DEFECT_BORDER_WIDTH = 1
